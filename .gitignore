@@ -8,6 +8,7 @@
 *.log
 /tmp_*
 /__codex_*
+**/__codex_*
 /dist/
 /backups/
 /_deleted_versions/
