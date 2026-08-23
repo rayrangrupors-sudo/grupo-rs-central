@@ -1,0 +1,10 @@
+<svg xmlns="http://w3.org" viewBox="0 0 24 24" width="24" height="24">
+  <!-- Fundo transparente para encaixe perfeito -->
+  <rect width="24" height="24" fill="none"/>
+  
+  <!-- Porta / Caixa com abertura na direita -->
+  <path d="M10 3H6C4.89 3 4 3.89 4 5V19C4 20.11 4.89 21 6 21H10" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  
+  <!-- Seta indicando para a direita (Sair) -->
+  <path d="M10 12H20 M16 7L21 12L16 17" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,30 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+*.exe
+*.pck
+*.tmp
+.codex_*.log
+*.log
+/tmp_*
+/__codex_*
+/dist/
+/backups/
+/_deleted_versions/
+/releases/
+.secrets/
+**/.secrets/
+*.vault
+*.enc
+
+# Pacotes finais imutaveis ficam preservados no disco, mas nao entram no Git.
+/releases/
+
+# Local AI credentials and private runtime state
+ai_config.json
+**/ai_config.json
+.env
+.env.*
+gemini_api_key*
+.test-user*/
+artifacts/

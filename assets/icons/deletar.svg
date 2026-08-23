@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 24 24"
+     width="24"
+     height="24">
+
+  <rect width="24" height="24" fill="none"/>
+
+  <!-- Tampa -->
+  <path d="M8 6H16"
+        fill="none"
+        stroke="#FFFFFF"
+        stroke-width="2"
+        stroke-linecap="round"/>
+
+  <!-- Puxador -->
+  <path d="M10 4H14"
+        fill="none"
+        stroke="#FFFFFF"
+        stroke-width="2"
+        stroke-linecap="round"/>
+
+  <!-- Corpo da lixeira -->
+  <path d="M7 6L8 20H16L17 6"
+        fill="none"
+        stroke="#FFFFFF"
+        stroke-width="2"
+        stroke-linejoin="round"/>
+
+  <!-- Linhas internas -->
+  <path d="M10 10V17"
+        fill="none"
+        stroke="#FFFFFF"
+        stroke-width="2"
+        stroke-linecap="round"/>
+
+  <path d="M14 10V17"
+        fill="none"
+        stroke="#FFFFFF"
+        stroke-width="2"
+        stroke-linecap="round"/>
+</svg>

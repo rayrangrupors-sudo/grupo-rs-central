@@ -1,0 +1,290 @@
+﻿<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RS IPERATRIZ</title>
+
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0d47a1">
+<link rel="icon" href="/img/favicon.ico">
+
+<style>
+body {
+    margin: 0;
+    height: 100vh;
+    background: linear-gradient(135deg, #003580, #001d4a);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: Segoe UI, Arial, sans-serif;
+}
+.login-card {
+    background-color: #0a3a80;
+    border-radius: 12px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.4);
+    width: 380px;
+    padding: 40px 30px;
+    color: #fff;
+    animation: fadeIn .4s ease-out;
+}
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(15px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+.login-card img.logo {
+    width: 250px;
+    display: block;
+    margin: 0 auto 20px;
+}
+.login-card h4 {
+    text-align: center;
+    font-weight: 600;
+    margin-bottom: 25px;
+}
+.field {
+    position: relative;
+    width: 100%;
+    margin-bottom: 12px;
+}
+.field input.form-control {
+    width: 100%;
+    height: 44px;
+    padding: 10px 40px 10px 12px;
+    background-color: #f8f9fc;
+    border: none;
+    border-radius: 6px;
+    color: #000;
+}
+.field input.form-control:focus {
+    outline: none;
+    box-shadow: 0 0 0 3px #ff7b00;
+}
+.toggle-password {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    cursor: pointer;
+    width: 24px;
+    height: 24px;
+    opacity: 0.75;
+}
+.remember {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+}
+.btn-login {
+    background-color: #ff7b00;
+    border: none;
+    width: 100%;
+    font-size: 17px;
+    padding: 10px;
+    border-radius: 6px;
+    margin-top: 12px;
+    color: #fff;
+    font-weight: 600;
+}
+.btn-login:hover { background-color: #ff9300; }
+.footer {
+    text-align: center;
+    margin-top: 15px;
+    color: #aab8d3;
+    font-size: 13px;
+}
+.btn-voltar {
+    margin-top: 8px;
+    background: transparent;
+    border: 1px solid #ff7b00;
+    color: #ff7b00;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 14px;
+    width: 100%;
+    transition: .2s;
+}
+.btn-voltar:hover {
+    background: #ff7b00;
+    color: #fff;
+}
+
+/* BOTAO PWA */
+#btnInstalarApp{
+    position:fixed;
+    right:20px;
+    bottom:20px;
+    z-index:999999;
+    border:none;
+    background:#ff7b00;
+    color:#fff;
+    padding:14px 18px;
+    border-radius:14px;
+    font-weight:bold;
+    font-size:15px;
+    box-shadow:0 5px 18px rgba(0,0,0,.35);
+    display:none;
+    transition:.2s;
+}
+
+#btnInstalarApp:hover{
+    background:#ff9200;
+    transform:translateY(-2px);
+}
+
+@media(max-width:600px){
+
+    .login-card{
+        width:92%;
+        padding:30px 20px;
+    }
+
+    .login-card img.logo{
+        width:220px;
+    }
+
+    #btnInstalarApp{
+        left:15px;
+        right:15px;
+        bottom:15px;
+        width:calc(100% - 30px);
+    }
+}
+
+</style>
+</head>
+
+<body>
+
+
+<button id="btnInstalarApp">
+📲 Instalar App
+</button>
+
+
+<div class="login-card">
+    <img src="/img/logo.png" class="logo" alt="Logo" />
+    <h4>Acesse sua conta</h4>
+
+    
+    <form method="post" autocomplete="off" id="loginForm">
+        <div class="field">
+            <input type="text" id="usuario" name="usuario" class="form-control" placeholder="Usuario" required>
+        </div>
+
+        <div class="field">
+            <input type="password" id="senha" name="senha" class="form-control" placeholder="Senha" required>
+            <svg class="toggle-password" onclick="toggleSenha()" viewBox="0 0 24 24" fill="#6b7280">
+                <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zm0 12a4.5 4.5 0 110-9 4.5 4.5 0 010 9z"/>
+            </svg>
+        </div>
+
+        <div class="remember">
+            <input type="checkbox" class="form-check-input" id="lembrar">
+            <label for="lembrar" class="form-check-label">Lembrar usuario</label>
+        </div>
+
+        <button type="submit" class="btn btn-login">Entrar</button>
+
+        <div class="footer">
+            <h2><b>RS IMPERATRIZ</b></h2>
+
+            <a href="/index.html" class="btn btn-voltar">
+                Voltar para o inicio
+            </a>
+        </div>
+    </form>
+</div>
+
+<script>
+function toggleSenha() {
+    let f = document.getElementById("senha");
+    f.type = f.type === "password" ? "text" : "password";
+}
+
+const usuario = document.getElementById('usuario');
+const senha   = document.getElementById('senha');
+const lembrar = document.getElementById('lembrar');
+const form    = document.getElementById('loginForm');
+
+window.addEventListener('load', () => {
+    const u = localStorage.getItem('userDellcar') || '';
+    const s = localStorage.getItem('passDellcar') || '';
+    if (u && s) {
+        usuario.value = u;
+        senha.value   = s;
+        lembrar.checked = true;
+    }
+});
+
+form.addEventListener('submit', () => {
+    if (lembrar.checked) {
+        localStorage.setItem('userDellcar', usuario.value);
+        localStorage.setItem('passDellcar', senha.value);
+    } else {
+        localStorage.removeItem('userDellcar');
+        localStorage.removeItem('passDellcar');
+    }
+});
+
+if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/service-worker.js");
+}
+</script>
+
+
+<script>
+let deferredPrompt = null;
+
+window.addEventListener("beforeinstallprompt", (e) => {
+
+    console.log("PWA disponivel");
+
+    e.preventDefault();
+
+    deferredPrompt = e;
+
+    const btn = document.getElementById("btnInstalarApp");
+
+    if(btn){
+        btn.style.display = "block";
+    }
+});
+
+document.getElementById("btnInstalarApp")
+.addEventListener("click", async () => {
+
+    if (!deferredPrompt) {
+
+        alert("Instalacao ainda nao disponivel.");
+
+        return;
+    }
+
+    deferredPrompt.prompt();
+
+    const result = await deferredPrompt.userChoice;
+
+    console.log(result);
+
+    deferredPrompt = null;
+
+    document.getElementById("btnInstalarApp").style.display = "none";
+});
+
+window.addEventListener("appinstalled", () => {
+
+    console.log("PWA instalado com sucesso");
+
+    document.getElementById("btnInstalarApp").style.display = "none";
+});
+</script>
+
+
+</body>
+</html>
+

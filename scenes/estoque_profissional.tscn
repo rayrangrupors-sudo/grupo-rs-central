@@ -1,0 +1,9 @@
+[gd_scene format=3 uid="uid://dihmm1b7dgoe4"]
+
+[ext_resource type="Script" path="res://src/location_layout.gd" id="1"]
+
+[node name="InventoryDashboard" type="Control" unique_id=134548611]
+layout_mode = 3
+anchors_preset = 0
+script = ExtResource("1")
+editor_description = "Tela principal com design de mapa e localização 4.0.35"
