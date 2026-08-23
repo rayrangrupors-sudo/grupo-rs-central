@@ -9871,6 +9871,19 @@ func _show_list() -> void:
 	_refresh_table()
 
 
+func _show_list_with_status(status_key: String = "all") -> void:
+	# Os cards do dashboard abrem o mesmo recorte que originou cada indicador.
+	# A navegação continua local e não dispara nenhuma operação remota.
+	var normalized := status_key.strip_edges().to_lower()
+	var allowed := ["all", "estoque", "reserva", "instalado", "manutencao", "inativo"]
+	if normalized not in allowed:
+		normalized = "all"
+	if _is_regional_branch() and normalized not in ["all", "estoque", "instalado", "parado"]:
+		normalized = "all"
+	selected_status_filter_key = normalized
+	_show_list()
+
+
 func _show_smart_4g_monitor() -> void:
 	if not _branch_supports_monitor_4g():
 		_show_warning("Mapa de ERB's", "Este recurso esta disponivel somente para a base de Imperatriz.")
@@ -15177,12 +15190,12 @@ func _build_dashboard_view() -> Control:
 	grid.add_theme_constant_override("v_separation", 12)
 	root.add_child(grid)
 
-	grid.add_child(_make_stat_card("Equipamentos", str(stats.get("total", 0)), "Cadastrados no estoque", BLUE, trends.get("Equipamentos", {}), Callable(self, "_show_list")))
-	grid.add_child(_make_stat_card("Em estoque", str(stats.get("available", 0)), "Disponiveis para uso", GREEN, trends.get("Em estoque", {}), Callable(self, "_show_list")))
-	grid.add_child(_make_stat_card("Reserva", str(stats.get("reserved", 0)), "Aparelhos em reserva", YELLOW, trends.get("Reserva", {}), Callable(self, "_show_list")))
-	grid.add_child(_make_stat_card("Instalados", str(stats.get("installed", 0)), "Aparelhos instalados", BLUE_DARK, trends.get("Instalados", {}), Callable(self, "_show_list")))
-	grid.add_child(_make_stat_card("Manutencoes", str(stats.get("maintenance", 0)), "Encaminhados para revisao", ORANGE, trends.get("Manutencoes", {}), Callable(self, "_show_maintenance_schedule")))
-	grid.add_child(_make_stat_card("Inativos", str(stats.get("inactive", 0)), "Fora da operacao", RED, trends.get("Inativos", {}), Callable(self, "_show_list")))
+	grid.add_child(_make_stat_card("Equipamentos", str(stats.get("total", 0)), "Cadastrados no estoque", BLUE, trends.get("Equipamentos", {}), Callable(self, "_show_list_with_status").bind("all")))
+	grid.add_child(_make_stat_card("Em estoque", str(stats.get("available", 0)), "Disponiveis para uso", GREEN, trends.get("Em estoque", {}), Callable(self, "_show_list_with_status").bind("estoque")))
+	grid.add_child(_make_stat_card("Reserva", str(stats.get("reserved", 0)), "Aparelhos em reserva", YELLOW, trends.get("Reserva", {}), Callable(self, "_show_list_with_status").bind("reserva")))
+	grid.add_child(_make_stat_card("Instalados", str(stats.get("installed", 0)), "Aparelhos instalados", BLUE_DARK, trends.get("Instalados", {}), Callable(self, "_show_list_with_status").bind("instalado")))
+	grid.add_child(_make_stat_card("Manutencoes", str(stats.get("maintenance", 0)), "Encaminhados para revisao", ORANGE, trends.get("Manutencoes", {}), Callable(self, "_show_list_with_status").bind("manutencao")))
+	grid.add_child(_make_stat_card("Inativos", str(stats.get("inactive", 0)), "Fora da operacao", RED, trends.get("Inativos", {}), Callable(self, "_show_list_with_status").bind("inativo")))
 
 	var charts := HBoxContainer.new()
 	charts.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -45143,27 +45156,33 @@ func _make_stat_card(title_text: String, value_text: String, hint_text: String, 
 	margin.add_theme_constant_override("margin_top", 13)
 	margin.add_theme_constant_override("margin_bottom", 13)
 	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(margin)
 
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_BEGIN
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_theme_constant_override("separation", 10)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	margin.add_child(row)
 
 	var icon_panel := PanelContainer.new()
 	icon_panel.custom_minimum_size = Vector2(52, 52)
+	icon_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	icon_panel.add_theme_stylebox_override("panel", AppDesignSystem.surface(AppDesignSystem.metric_tint(fill), Color.TRANSPARENT, 0, 26))
 	row.add_child(icon_panel)
 	var icon_center := CenterContainer.new()
+	icon_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	icon_panel.add_child(icon_center)
 	var icon := _make_sidebar_icon(_dashboard_stat_icon(title_text), fill)
 	icon.custom_minimum_size = Vector2(26, 26)
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	icon_center.add_child(icon)
 
 	var vbox := VBoxContainer.new()
 	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vbox.add_theme_constant_override("separation", 1)
+	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(vbox)
 
 	var title := Label.new()
@@ -45171,6 +45190,7 @@ func _make_stat_card(title_text: String, value_text: String, hint_text: String, 
 	title.add_theme_font_override("font", UI_FONT)
 	title.add_theme_font_size_override("font_size", 13)
 	title.add_theme_color_override("font_color", AppDesignSystem.MUTED)
+	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vbox.add_child(title)
 
 	var value := Label.new()
@@ -45178,6 +45198,7 @@ func _make_stat_card(title_text: String, value_text: String, hint_text: String, 
 	value.add_theme_font_override("font", UI_FONT)
 	value.add_theme_font_size_override("font_size", 27)
 	value.add_theme_color_override("font_color", AppDesignSystem.TEXT)
+	value.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vbox.add_child(value)
 
 	var hint := Label.new()
@@ -45185,12 +45206,14 @@ func _make_stat_card(title_text: String, value_text: String, hint_text: String, 
 	hint.clip_text = true
 	hint.add_theme_font_size_override("font_size", 12)
 	hint.add_theme_color_override("font_color", AppDesignSystem.MUTED)
+	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vbox.add_child(hint)
 
 	var trend_stack := VBoxContainer.new()
 	trend_stack.alignment = BoxContainer.ALIGNMENT_CENTER
 	trend_stack.custom_minimum_size = Vector2(88, 0)
 	trend_stack.size_flags_horizontal = Control.SIZE_SHRINK_END
+	trend_stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(trend_stack)
 	var trend_label := Label.new()
 	trend_label.text = str(trend.get("text", "Atualizado agora"))
@@ -45198,12 +45221,14 @@ func _make_stat_card(title_text: String, value_text: String, hint_text: String, 
 	trend_label.add_theme_font_override("font", UI_FONT)
 	trend_label.add_theme_font_size_override("font_size", 12)
 	trend_label.add_theme_color_override("font_color", trend.get("color", MUTED))
+	trend_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	trend_stack.add_child(trend_label)
 	var trend_hint := Label.new()
 	trend_hint.text = "vs ontem" if bool(trend.get("has_comparison", false)) else "status atual"
 	trend_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	trend_hint.add_theme_font_size_override("font_size", 10)
 	trend_hint.add_theme_color_override("font_color", MUTED)
+	trend_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	trend_stack.add_child(trend_hint)
 
 	return panel
