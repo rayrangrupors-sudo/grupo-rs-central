@@ -824,6 +824,10 @@ class Smart4GMapCanvas:
 	var coverage_cells: Array[Dictionary] = []
 	var stations: Array[Dictionary] = []
 	var tracking_locations: Array[Dictionary] = []
+	# Marcador opcional usado pelo Mapa Grande quando uma placa e pesquisada
+	# enquanto o modo ERB esta ativo. As torres continuam sendo desenhadas
+	# normalmente; a agulha fica sobreposta somente para indicar o veiculo.
+	var searched_location: Dictionary = {}
 	var selected_index := -1
 	var selected_cell_index := -1
 	var selected_station_index := -1
@@ -854,6 +858,11 @@ class Smart4GMapCanvas:
 	var map_tile_total_count := 0
 	var map_tile_size := 256
 	var tracking_motion: Dictionary = {}
+	# Agulhas vetoriais de localização: o mesmo componente visual é usado nas
+	# telas Localização e Mapa de ERB's, mantendo a leitura de estado consistente.
+	const LOCATION_PIN_GREEN: Texture2D = preload("res://assets/icons/agulha_localizacao_verde.svg")
+	const LOCATION_PIN_YELLOW: Texture2D = preload("res://assets/icons/agulha_localizacao_amarela.svg")
+	const LOCATION_PIN_RED: Texture2D = preload("res://assets/icons/agulha_localizacao_vermelha.svg")
 
 	const MIN_MAP_ZOOM := 12
 	const MAX_MAP_ZOOM := 17
@@ -911,6 +920,14 @@ class Smart4GMapCanvas:
 			set_process(true)
 		queue_redraw()
 
+	func set_searched_location(location: Dictionary) -> void:
+		searched_location = location.duplicate(true) if not location.is_empty() else {}
+		queue_redraw()
+
+	func clear_searched_location() -> void:
+		searched_location.clear()
+		queue_redraw()
+
 	func _tracking_location_key(location: Dictionary, location_index: int) -> String:
 		for field in ["vehicle_id", "equipment_id", "serial", "plate"]:
 			var value := str(location.get(field, "")).strip_edges()
@@ -923,6 +940,13 @@ class Smart4GMapCanvas:
 			float(str(location.get("lat", "0"))),
 			float(str(location.get("lng", "0"))),
 		)
+
+	func _searched_location_geo() -> Vector2:
+		if searched_location.is_empty():
+			return Vector2.ZERO
+		var latitude := str(searched_location.get("lat", searched_location.get("latitude", "0"))).replace(",", ".")
+		var longitude := str(searched_location.get("lng", searched_location.get("lon", searched_location.get("longitude", "0")))).replace(",", ".")
+		return Vector2(float(latitude), float(longitude))
 
 	func _tracking_display_geo(location_index: int, location: Dictionary) -> Vector2:
 		var target_geo := _tracking_target_geo(location)
@@ -1317,6 +1341,8 @@ class Smart4GMapCanvas:
 			# directly selectable and the legend keeps its normal meaning.
 			for station_index in range(stations.size()):
 				_draw_station_marker(stations[station_index], station_index)
+		if not tracking_mode and not searched_location.is_empty():
+			_draw_searched_location()
 		if tracking_mode:
 			for group_value in _tracking_visual_groups():
 				var group: Dictionary = group_value
@@ -1354,23 +1380,13 @@ class Smart4GMapCanvas:
 			return
 		# Pixel snapping keeps the glyph crisp and prevents fractional-coordinate shimmer.
 		position = Vector2(roundf(position.x), roundf(position.y))
-		var color := _operator_color(str(station.get("operator", "")))
+		# ERBs usam a agulha amarela: são pontos de infraestrutura/catálogo, não
+		# veículos monitorados. O destaque azul continua indicando seleção.
 		var selected := station_index == selected_station_index
-		var generation_color := Color("#ff7a00") if str(station.get("generation", generation)) == "4G" else Color("#0a2b4a")
 		if selected:
 			draw_circle(position, 18.0, Color(0.0, 0.44, 0.72, 0.10))
 			draw_arc(position, 18.0, 0.0, TAU, 32, Color("#0070b8"), 1.6, true)
-		# Ground shadow and the tower's three-legged silhouette.
-		draw_line(position + Vector2(-9, 11), position + Vector2(9, 11), Color(0.03, 0.12, 0.20, 0.24), 3.0, true)
-		draw_line(position + Vector2(0, -13), position + Vector2(-8, 11), color, 2.4, true)
-		draw_line(position + Vector2(0, -13), position + Vector2(8, 11), color, 2.4, true)
-		draw_line(position + Vector2(0, -13), position + Vector2(0, 11), color, 2.2, true)
-		draw_line(position + Vector2(-5, -1), position + Vector2(5, -1), color, 1.6, true)
-		draw_line(position + Vector2(-6, 5), position + Vector2(6, 5), color, 1.6, true)
-		draw_line(position + Vector2(-9, 11), position + Vector2(9, 11), color, 2.4, true)
-		# Small generation signal above the mast; it is not a second marker.
-		draw_arc(position + Vector2(0, -14), 6.0, -PI * 0.82, -PI * 0.18, 12, generation_color, 1.6, true)
-		draw_arc(position + Vector2(0, -14), 10.0, -PI * 0.78, -PI * 0.22, 14, Color(generation_color.r, generation_color.g, generation_color.b, 0.55), 1.2, true)
+		_draw_location_pin(position, LOCATION_PIN_YELLOW, selected, 0.56)
 
 	func _draw_tracking_marker(location: Dictionary, location_index: int = -1) -> void:
 		var target_geo := _tracking_target_geo(location)
@@ -1382,6 +1398,16 @@ class Smart4GMapCanvas:
 		var color := _tracking_marker_color(location)
 		var selected := location_index == selected_tracking_index
 		_draw_tracking_pin(position, color, _tracking_plate_label(location), selected, 0)
+
+	func _draw_searched_location() -> void:
+		var geo := _searched_location_geo()
+		if is_zero_approx(geo.x) and is_zero_approx(geo.y):
+			return
+		var position := _map_position(geo.x, geo.y)
+		if position.x < -28.0 or position.y < -28.0 or position.x > size.x + 28.0 or position.y > size.y + 28.0:
+			return
+		var color := _tracking_marker_color(searched_location)
+		_draw_tracking_pin(position, color, _tracking_plate_label(searched_location), true, 0)
 
 	func _draw_tracking_cluster_marker(group: Dictionary) -> void:
 		var indices: Array = group.get("indices", [])
@@ -1430,48 +1456,34 @@ class Smart4GMapCanvas:
 			draw_arc(pin_center, 30.0, 0.0, TAU, 48, Color("#19a8e0"), 2.0, true)
 		else:
 			draw_circle(pin_center, 26.0, Color(color.r, color.g, color.b, 0.10))
-		# Contorno branco faz o pino destacar tanto em ruas claras quanto escuras.
-		var outer := PackedVector2Array([
-			pin_center + Vector2(-16.0, -11.0), pin_center + Vector2(-11.0, -20.0),
-			pin_center + Vector2(0.0, -24.0), pin_center + Vector2(11.0, -20.0),
-			pin_center + Vector2(16.0, -11.0), pin_center + Vector2(16.0, -1.0),
-			pin_center + Vector2(10.0, 8.0), pin_center + Vector2(0.0, 31.0),
-			pin_center + Vector2(-10.0, 8.0), pin_center + Vector2(-16.0, -1.0),
-		])
-		var shadow := PackedVector2Array()
-		for point in outer:
-			shadow.append(point + Vector2(1.5, 3.0))
-		draw_colored_polygon(shadow, Color(0.02, 0.08, 0.14, 0.30))
-		draw_colored_polygon(outer, Color.WHITE)
-		var body := PackedVector2Array([
-			pin_center + Vector2(-13.0, -10.0), pin_center + Vector2(-9.0, -17.0),
-			pin_center + Vector2(0.0, -20.0), pin_center + Vector2(9.0, -17.0),
-			pin_center + Vector2(13.0, -10.0), pin_center + Vector2(13.0, -1.0),
-			pin_center + Vector2(8.0, 6.0), pin_center + Vector2(0.0, 25.0),
-			pin_center + Vector2(-8.0, 6.0), pin_center + Vector2(-13.0, -1.0),
-		])
-		draw_colored_polygon(body, color)
-		# Disco branco e carro navy: leitura imediata mesmo quando o mapa esta cheio.
-		var icon_center := pin_center + Vector2(0.0, -7.0)
-		draw_circle(icon_center, 12.5, Color.WHITE)
-		var car := PackedVector2Array([
-			icon_center + Vector2(-8.0, -2.0), icon_center + Vector2(-5.0, -7.0),
-			icon_center + Vector2(4.5, -7.0), icon_center + Vector2(8.0, -2.0),
-			icon_center + Vector2(8.0, 5.0), icon_center + Vector2(-8.0, 5.0),
-		])
-		draw_colored_polygon(car, Color("#12344e"))
-		draw_colored_polygon(PackedVector2Array([
-			icon_center + Vector2(-4.0, -5.5), icon_center + Vector2(3.5, -5.5),
-			icon_center + Vector2(5.0, -2.0), icon_center + Vector2(-5.0, -2.0),
-		]), Color("#d8eef7"))
-		draw_circle(icon_center + Vector2(-4.5, 5.0), 2.0, Color("#12344e"))
-		draw_circle(icon_center + Vector2(4.5, 5.0), 2.0, Color("#12344e"))
+		# A agulha SVG é vetorial e permanece nítida em qualquer zoom. O centro
+		# da agulha coincide com a coordenada real do aparelho.
+		_draw_location_pin(anchor, _location_pin_for_color(color), selected, 0.56)
 		if badge_count > 1:
 			var badge_position := pin_center + Vector2(20.0, -25.0)
 			draw_circle(badge_position + Vector2(1.0, 2.0), 12.0, Color(0.02, 0.08, 0.14, 0.28))
 			draw_circle(badge_position, 12.0, Color("#0d2941"))
 			draw_arc(badge_position, 12.0, 0.0, TAU, 24, Color.WHITE, 1.0, true)
 			draw_string(font, badge_position + Vector2(-8.0, 4.0), str(badge_count), HORIZONTAL_ALIGNMENT_CENTER, 16.0, 11, Color.WHITE)
+
+	func _location_pin_for_color(color: Color) -> Texture2D:
+		if color.g > color.r * 1.25 and color.g > color.b * 1.15:
+			return LOCATION_PIN_GREEN
+		if color.r > color.g * 1.35:
+			return LOCATION_PIN_RED
+		return LOCATION_PIN_YELLOW
+
+	func _draw_location_pin(anchor: Vector2, texture: Texture2D, selected: bool, scale_factor: float = 0.56) -> void:
+		if texture == null:
+			return
+		var pin_size := Vector2(64.0, 80.0) * scale_factor
+		var rect := Rect2(
+			Vector2(roundf(anchor.x - pin_size.x * 0.5), roundf(anchor.y - pin_size.y)),
+			pin_size
+		)
+		if selected:
+			draw_circle(Vector2(anchor.x, anchor.y - pin_size.y * 0.48), pin_size.x * 0.52, Color(0.0, 0.44, 0.72, 0.12))
+		draw_texture_rect(texture, rect, false)
 
 	func _tracking_marker_color(location: Dictionary) -> Color:
 		var communication_state := str(location.get("communication_state", "")).strip_edges().to_lower()
@@ -2204,6 +2216,10 @@ var vehicle_location_refreshing := false
 var vehicle_location_source := ""
 var vehicle_location_map_generation := 0
 var vehicle_location_query_generation := 0
+var big_map_mode := "erb"
+var big_map_mode_content: VBoxContainer
+var big_map_root: VBoxContainer
+var big_map_mode_buttons: Dictionary = {}
 var search_refresh_timer: Timer
 var selected_branch_id := ""
 var selected_branch_name := ""
@@ -2822,6 +2838,10 @@ func _clear_screen() -> void:
 	vehicle_location_source = ""
 	vehicle_location_map_generation += 1
 	vehicle_location_query_generation += 1
+	big_map_mode = "erb"
+	big_map_mode_content = null
+	big_map_root = null
+	big_map_mode_buttons.clear()
 	table_row_nodes.clear()
 	table_row_signatures.clear()
 	table_plate_drafts.clear()
@@ -4478,8 +4498,6 @@ func _build_sidebar() -> Control:
 	list.add_child(divider)
 
 	list.add_child(_make_sidebar_button("Inicio", "dashboard", "dashboard", _show_dashboard))
-	if _branch_supports_monitor_4g():
-		list.add_child(_make_sidebar_button("Mapa de ERB's", "localizacao", "monitor_4g", _show_smart_4g_monitor))
 	list.add_child(_make_sidebar_equipment_group())
 	if _branch_supports_sms():
 		list.add_child(_make_sidebar_button("Painel SMS", "timeline", "sms_panel", _show_sms_panel))
@@ -4546,7 +4564,7 @@ func _make_sidebar_equipment_group() -> Control:
 		_make_sidebar_button("Estoque", "cadastros", "inventory", _show_list, true)
 	)
 	sidebar_equipment_children.add_child(
-		_make_sidebar_button("Localização", "localizacao", "tracking", _show_vehicle_location_monitor, true)
+		_make_sidebar_button("Mapa Grande", "localizacao", "big_map", Callable(self, "_show_big_map").bind("vehicles"), true)
 	)
 	sidebar_equipment_children.add_child(
 		_make_sidebar_button("Cadastro em massa", "arquivo", "bulk", _show_bulk_registration, true)
@@ -4761,7 +4779,7 @@ func _apply_sidebar_button_state(button: Button, active: bool) -> void:
 
 
 func _is_sidebar_equipment_section(section: String) -> bool:
-	return section in ["inventory", "vehicle_location", "bulk"]
+	return section in ["inventory", "vehicle_location", "monitor_4g", "big_map", "bulk"]
 
 
 func _toggle_sidebar_equipment_group() -> void:
@@ -5670,7 +5688,8 @@ func _setup_st310_location_poll_timer() -> void:
 
 
 func _poll_st310_location_packet() -> void:
-	if st310_location_polling or current_section != "vehicle_location":
+	var vehicle_mode_active := current_section == "vehicle_location" or (current_section == "big_map" and big_map_mode == "vehicles")
+	if st310_location_polling or not vehicle_mode_active:
 		return
 	if vehicle_location_plate_input == null or not is_instance_valid(vehicle_location_plate_input):
 		return
@@ -5684,7 +5703,7 @@ func _poll_st310_location_packet() -> void:
 	# A localizacao e servida pela API de rastreamento e nao depende do
 	# Firebase. A releitura da base operacional acontece em seu proprio ciclo
 	# de sincronizacao, sem bloquear o mapa quando o estoque estiver offline.
-	if current_section == "vehicle_location" and vehicle_location_plate_input != null and is_instance_valid(vehicle_location_plate_input):
+	if vehicle_mode_active and vehicle_location_plate_input != null and is_instance_valid(vehicle_location_plate_input):
 		await _refresh_vehicle_location_view(vehicle_location_query_generation)
 	st310_location_polling = false
 
@@ -9851,6 +9870,8 @@ func _restore_current_content_after_connection() -> void:
 			_show_vehicle_location_monitor()
 		"monitor_4g":
 			_show_smart_4g_monitor()
+		"big_map":
+			_show_big_map(big_map_mode)
 		"bulk":
 			_show_bulk_registration()
 		"logs":
@@ -9900,21 +9921,131 @@ func _show_smart_4g_monitor() -> void:
 	if not _branch_supports_monitor_4g():
 		_show_warning("Mapa de ERB's", "Este recurso esta disponivel somente para a base de Imperatriz.")
 		return
-	_set_page_context("monitor_4g", "Mapa de ERB's", "Catálogo Anatel com busca inteligente por área e placa")
-	_set_content_margins(28, 18, 28, 20)
-	_set_content(_build_smart_4g_monitor_view())
-	if smart_4g_snapshot.is_empty() and not smart_4g_refreshing:
-		call_deferred("_refresh_smart_4g_monitor")
+	_show_big_map("erb")
 
 
 func _show_vehicle_location_monitor() -> void:
-	_set_page_context("vehicle_location", "Localização", "Rastreamento dos veículos e aparelhos em tempo real")
-	_set_content_margins(28, 20, 28, 18)
-	_set_content(_build_vehicle_location_view())
+	_show_big_map("vehicles")
+
+
+func _show_big_map(preferred_mode: String = "") -> void:
+	if preferred_mode in ["erb", "vehicles"]:
+		big_map_mode = preferred_mode
+	_set_page_context("big_map", "Mapa Grande", "Torres ERB e localização de veículos em um único mapa")
+	_set_content_margins(28, 18, 28, 20)
+	_set_content(_build_big_map_view())
+	_switch_big_map_mode(big_map_mode)
+
+
+func _build_big_map_view() -> Control:
+	big_map_root = VBoxContainer.new()
+	big_map_root.name = "BigMapView"
+	big_map_root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	big_map_root.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	big_map_root.add_theme_constant_override("separation", 10)
+
+	var mode_panel := PanelContainer.new()
+	mode_panel.name = "BigMapModePanel"
+	mode_panel.add_theme_stylebox_override("panel", _style_box(Color("#ffffff"), BORDER, 1, 10))
+	var mode_margin := MarginContainer.new()
+	mode_margin.add_theme_constant_override("margin_left", 12)
+	mode_margin.add_theme_constant_override("margin_right", 12)
+	mode_margin.add_theme_constant_override("margin_top", 9)
+	mode_margin.add_theme_constant_override("margin_bottom", 9)
+	mode_panel.add_child(mode_margin)
+	var mode_row := HBoxContainer.new()
+	mode_row.add_theme_constant_override("separation", 8)
+	mode_margin.add_child(mode_row)
+	var mode_title := Label.new()
+	mode_title.text = "Mapa Grande"
+	mode_title.custom_minimum_size = Vector2(150, 42)
+	mode_title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	mode_title.add_theme_font_override("font", UI_FONT)
+	mode_title.add_theme_font_size_override("font_size", 17)
+	mode_title.add_theme_color_override("font_color", BLUE_DARK)
+	mode_row.add_child(mode_title)
+	var erb_button := _make_action_button("Torres ERB", BLUE, BLUE, Color.WHITE, Vector2(138, 42), Callable(self, "_switch_big_map_mode").bind("erb"))
+	erb_button.name = "BigMapErbButton"
+	var vehicle_button := _make_action_button("Veículos", GREEN, GREEN, Color.WHITE, Vector2(138, 42), Callable(self, "_switch_big_map_mode").bind("vehicles"))
+	vehicle_button.name = "BigMapVehiclesButton"
+	mode_row.add_child(erb_button)
+	mode_row.add_child(vehicle_button)
+	big_map_mode_buttons = {"erb": erb_button, "vehicles": vehicle_button}
+	var mode_hint := Label.new()
+	mode_hint.text = "Torres e agulhas compartilham o mesmo mapa"
+	mode_hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mode_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	mode_hint.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	mode_hint.add_theme_font_override("font", UI_FONT)
+	mode_hint.add_theme_font_size_override("font_size", 12)
+	mode_hint.add_theme_color_override("font_color", MUTED)
+	mode_row.add_child(mode_hint)
+	big_map_root.add_child(mode_panel)
+
+	big_map_mode_content = VBoxContainer.new()
+	big_map_mode_content.name = "BigMapModeContent"
+	big_map_mode_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	big_map_mode_content.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	big_map_root.add_child(big_map_mode_content)
+	return big_map_root
+
+
+func _switch_big_map_mode(mode: String) -> void:
+	if mode not in ["erb", "vehicles"]:
+		mode = "erb"
+	big_map_mode = mode
+	if big_map_mode_buttons.size() > 0:
+		for key in big_map_mode_buttons:
+			var button := big_map_mode_buttons.get(key) as Button
+			if button == null or not is_instance_valid(button):
+				continue
+			var active := str(key) == mode
+			button.modulate = Color.WHITE if active else Color(0.78, 0.86, 0.92, 1.0)
+	if big_map_mode_content == null or not is_instance_valid(big_map_mode_content):
+		return
+	for child in big_map_mode_content.get_children():
+		big_map_mode_content.remove_child(child)
+		child.queue_free()
+	if mode == "erb":
+		if not _branch_supports_monitor_4g():
+			big_map_mode_content.add_child(_make_big_map_empty_state("Torres ERB indisponíveis", "Esta base não possui catálogo Anatel configurado."))
+			return
+		big_map_mode_content.add_child(_build_smart_4g_monitor_view())
+		if smart_4g_snapshot.is_empty() and not smart_4g_refreshing:
+			call_deferred("_refresh_smart_4g_monitor")
+		return
+	big_map_mode_content.add_child(_build_vehicle_location_view())
 	if vehicle_location_rows.is_empty() and not vehicle_location_refreshing:
 		call_deferred("_refresh_vehicle_location_view")
 	else:
 		call_deferred("_apply_vehicle_location_filters")
+
+
+func _make_big_map_empty_state(title_text: String, body_text: String) -> Control:
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(0, 220)
+	panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	panel.add_theme_stylebox_override("panel", _style_box(Color("#ffffff"), BORDER, 1, 10))
+	var center := CenterContainer.new()
+	panel.add_child(center)
+	var stack := VBoxContainer.new()
+	stack.add_theme_constant_override("separation", 8)
+	center.add_child(stack)
+	var title := Label.new()
+	title.text = title_text
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_override("font", UI_FONT)
+	title.add_theme_font_size_override("font_size", 18)
+	title.add_theme_color_override("font_color", BLUE_DARK)
+	stack.add_child(title)
+	var body := Label.new()
+	body.text = body_text
+	body.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	body.add_theme_font_override("font", UI_FONT)
+	body.add_theme_font_size_override("font_size", 13)
+	body.add_theme_color_override("font_color", MUTED)
+	stack.add_child(body)
+	return panel
 
 
 func _build_vehicle_location_view() -> Control:
@@ -12681,6 +12812,7 @@ func _make_smart_4g_compact_map_panel(devices: Array[Dictionary]) -> Control:
 	smart_4g_map_canvas.set_city_label(_smart_4g_map_region_label(smart_4g_map_region_filter))
 	smart_4g_map_canvas.set_devices(mapped_devices)
 	smart_4g_map_canvas.set_coverage_profile(smart_4g_anatel_profile)
+	smart_4g_map_canvas.set_searched_location(_smart_4g_searched_location())
 	smart_4g_map_canvas.station_selected.connect(_show_smart_4g_station_details)
 	smart_4g_map_canvas.navigation_requested.connect(func(latitude: float, longitude: float, zoom: int):
 		call_deferred(
@@ -12872,6 +13004,15 @@ func _make_smart_4g_station_details_panel() -> PanelContainer:
 	actions.add_child(open_button)
 	stack.add_child(actions)
 	return panel
+
+
+func _smart_4g_searched_location() -> Dictionary:
+	# No Mapa Grande, a busca por placa compartilha o mapa das ERBs:
+	# as torres continuam visiveis e a agulha marca a coordenada retornada.
+	if smart_4g_location_search_mode != "plate":
+		return {}
+	var value: Variant = smart_4g_area_geocode.get("vehicle_location", {})
+	return (value as Dictionary).duplicate(true) if typeof(value) == TYPE_DICTIONARY else {}
 
 
 func _show_smart_4g_station_details(station: Dictionary) -> void:
@@ -13356,6 +13497,7 @@ func _apply_smart_4g_snapshot_to_view(reload_map_tiles: bool = false) -> void:
 		smart_4g_map_canvas.set_city_label(_smart_4g_map_region_label(smart_4g_map_region_filter))
 		smart_4g_map_canvas.set_devices([])
 		smart_4g_map_canvas.set_coverage_profile(smart_4g_anatel_profile)
+		smart_4g_map_canvas.set_searched_location(_smart_4g_searched_location())
 		var restored_station: Dictionary = {}
 		if smart_4g_selected_station_id != "":
 			for station_value in smart_4g_anatel_profile.get("stations", []) as Array:
