@@ -4564,7 +4564,7 @@ func _make_sidebar_equipment_group() -> Control:
 		_make_sidebar_button("Estoque", "cadastros", "inventory", _show_list, true)
 	)
 	sidebar_equipment_children.add_child(
-		_make_sidebar_button("Mapa Grande", "localizacao", "big_map", Callable(self, "_show_big_map").bind("vehicles"), true)
+		_make_sidebar_button("Mapa Grande", "localizacao", "big_map", Callable(self, "_show_big_map").bind("erb"), true)
 	)
 	sidebar_equipment_children.add_child(
 		_make_sidebar_button("Cadastro em massa", "arquivo", "bulk", _show_bulk_registration, true)
