@@ -5308,14 +5308,21 @@ func _run_remote_operation_job(job: Dictionary) -> void:
 		_remote_queue_stage(request, "Cadastro do equipamento", "API oficial consultando")
 		result = await _perform_equipment_registration(request)
 		if bool(result.get("ok", false)):
-			if bool(result.get("confirmation_pending", false)) and typeof(result.get("request", {})) == TYPE_DICTIONARY:
+			var registration_confirmation_pending := bool(result.get("confirmation_pending", false))
+			if registration_confirmation_pending and typeof(result.get("request", {})) == TYPE_DICTIONARY:
 				request.merge(result.get("request", {}) as Dictionary, true)
-			if bool(result.get("confirmation_pending", false)):
+			if registration_confirmation_pending:
+				_remote_queue_stage(request, "Confirmando cadastro e vinculo", "Aguardando leitura da API", "running", "API")
+				result = await _retry_pending_equipment_registration(request, result)
+				registration_confirmation_pending = bool(result.get("confirmation_pending", false))
+				if typeof(result.get("request", {})) == TYPE_DICTIONARY:
+					request.merge(result.get("request", {}) as Dictionary, true)
+			if registration_confirmation_pending:
 				var pending_message := str(result.get("message", "A API aceitou o cadastro, mas a confirmacao ainda esta pendente."))
-				_remote_queue_finish(queue_id, false, pending_message, "API", "pending")
+				_remote_queue_finish(queue_id, true, pending_message, "API", "pending")
 				_log_system_action_event(
-					"Operacao remota pendente",
-					"Cadastro aceito pela API, aguardando confirmacao. Serie: %s | %s" % [serial, pending_message],
+					"Confirmacao remota pendente",
+					"Cadastro aceito pela API; a fila retomara sem repetir o POST. Serie: %s | %s" % [serial, pending_message],
 					serial,
 					{
 						"status": "pending",
@@ -5335,6 +5342,11 @@ func _run_remote_operation_job(job: Dictionary) -> void:
 				result = {"ok": false, "message": str(finalized.get("message", "Falha ao atualizar o cadastro local."))}
 			else:
 				result["local"] = finalized
+				var firebase_result := await _ensure_firebase_registration_saved(serial, finalized.get("product", {}) as Dictionary)
+				if not bool(firebase_result.get("ok", false)):
+					result = {"ok": false, "message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao do cadastro.")), "firebase_pending": true}
+				else:
+					result["firebase"] = firebase_result
 	else:
 		_remote_queue_stage(request, "Consultando o aparelho", "API oficial")
 		result = await _perform_equipment_modification(request)
@@ -5359,7 +5371,7 @@ func _run_remote_operation_job(job: Dictionary) -> void:
 				_drain_remote_operation_queue()
 				return
 			_remote_queue_stage(request, "Confirmando modificacao", "API oficial" if not bool(result.get("web", false)) else "Fallback web", "running", "API" if not bool(result.get("web", false)) else "Fallback web")
-	if store != null:
+	if kind == "Modificacao" and store != null:
 		var finalized_modification := _finalize_local_equipment_modification(request)
 		if not bool(finalized_modification.get("ok", false)):
 			result = {"ok": false, "message": str(finalized_modification.get("message", "Falha ao atualizar o cadastro local."))}
@@ -5406,7 +5418,7 @@ func _run_remote_operation_job(job: Dictionary) -> void:
 		var message := str(result.get("message", "A operacao remota nao foi confirmada."))
 		_remote_queue_finish(queue_id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API")
 		_log_system_action("Falhou operacao remota", "%s | Serie: %s" % [message, serial], serial)
-	if kind == "Modificacao" and bool(result.get("ok", false)) and has_method("_on_remote_operation_localized"):
+	if bool(result.get("ok", false)) and not bool(result.get("confirmation_pending", false)) and has_method("_on_remote_operation_localized"):
 		call_deferred("_on_remote_operation_localized", kind, serial)
 	_drain_remote_operation_queue()
 
@@ -38351,6 +38363,7 @@ func _confirm_smart_registered_equipment(request: Dictionary, result: Dictionary
 			"confirmation_pending": true,
 			"message": str(confirmed.get("message", "O equipamento ainda nao foi confirmado pela API.")),
 			"equipment": result,
+			"request": request,
 		}
 	var row := confirmed.get("row", {}) as Dictionary
 	if not _grupo_rs_api_equipment_row_matches_request(row, request):
@@ -38361,6 +38374,7 @@ func _confirm_smart_registered_equipment(request: Dictionary, result: Dictionary
 			"message": "A API localizou a serie, mas os dados do chip ainda divergem da solicitacao.",
 			"equipment": result,
 			"row": row,
+			"request": request,
 		}
 	return {"ok": true, "result": result, "row": row}
 
@@ -38379,7 +38393,28 @@ func _perform_equipment_registration(request: Dictionary) -> Dictionary:
 		return {"ok": false, "message": "A busca em segundo plano nao confirmou ICCID completo, telefone e APN do chip. O cadastro local foi preservado; tente novamente apos a consulta concluir."}
 	if _equipment_registration_timed_out():
 		return _equipment_registration_timeout_result("validacao inicial")
-	var equipment_result := await _register_or_find_modern_equipment(request)
+	var equipment_result: Dictionary
+	# Depois que o POST foi aceito, nunca repita o cadastro do equipamento. A
+	# fila pode chamar este fluxo novamente somente para continuar a partir da
+	# leitura confirmada do IMEI.
+	if bool(request.get("_skip_equipment_registration", false)):
+		var pending_row: Variant = request.get("_pending_equipment_row", {})
+		if typeof(pending_row) != TYPE_DICTIONARY or (pending_row as Dictionary).is_empty():
+			return {
+				"ok": true,
+				"partial": true,
+				"confirmation_pending": true,
+				"message": "O equipamento foi aceito, mas a leitura de confirmacao ainda nao retornou uma linha segura.",
+				"request": request,
+			}
+		equipment_result = {
+			"ok": true,
+			"row": (pending_row as Dictionary).duplicate(true),
+			"api": true,
+			"confirmed_after_pending": true,
+		}
+	else:
+		equipment_result = await _register_or_find_modern_equipment(request)
 	if _equipment_registration_timed_out():
 		return _equipment_registration_timeout_result("confirmacao do equipamento")
 	if bool(equipment_result.get("confirmation_pending", false)):
@@ -38534,6 +38569,72 @@ func _perform_equipment_registration(request: Dictionary) -> Dictionary:
 	if transport_message != "":
 		message = "%s. %s" % [transport_message, message]
 	return {"ok": false, "message": message, "partial": true}
+
+
+func _retry_pending_equipment_registration(request: Dictionary, pending_result: Dictionary) -> Dictionary:
+	"""Reconcilia uma escrita aceita sem repetir o POST.
+
+	A API de cadastro pode responder antes de a listagem estar consistente. O
+	IMEI e a placa enviados continuam sendo a mesma operacao; apenas lemos até
+	que a linha apareça e retomamos a etapa seguinte.
+	"""
+	var serial := _digits_only(str(request.get("serial", request.get("remote_serial", ""))))
+	if serial == "":
+		return pending_result
+	var equipment_pending := pending_result.get("equipment", {}) as Dictionary
+	var vehicle_pending := pending_result.get("vehicle", {}) as Dictionary
+
+	# Primeiro caso: o equipamento foi aceito, mas ainda nao apareceu. Depois da
+	# leitura confirmada, continua para o vinculo da placa sem novo cadastro.
+	if bool(equipment_pending.get("confirmation_pending", false)) and vehicle_pending.is_empty():
+		var last_message := str(pending_result.get("message", "Aguardando publicacao do equipamento."))
+		for attempt in range(REMOTE_PENDING_CONFIRMATION_ATTEMPTS + 2):
+			if attempt > 0:
+				await get_tree().create_timer(REMOTE_PENDING_CONFIRMATION_DELAY_SECONDS).timeout
+			var confirmed := await _grupo_rs_api_find_equipment(serial, true)
+			if bool(confirmed.get("ok", false)):
+				request["_skip_equipment_registration"] = true
+				request["_pending_equipment_row"] = (confirmed.get("row", {}) as Dictionary).duplicate(true)
+				request.erase("_smart_confirmation_pending")
+				return await _perform_equipment_registration(request)
+			last_message = str(confirmed.get("message", last_message))
+		var unresolved := pending_result.duplicate(true)
+		unresolved["ok"] = true
+		unresolved["partial"] = true
+		unresolved["confirmation_pending"] = true
+		unresolved["message"] = "%s A confirmacao sera retomada automaticamente sem repetir o cadastro." % last_message
+		unresolved["request"] = request
+		return unresolved
+
+	# Segundo caso: o equipamento ja foi confirmado, mas a associacao veicular
+	# ainda nao apareceu. Confirme a placa pela leitura completa do portal/API.
+	if not vehicle_pending.is_empty() or not equipment_pending.is_empty():
+		var plate := _format_grupo_rs_vehicle_plate(str(request.get("plate", request.get("vehicle_target_plate", ""))))
+		if plate != "":
+			var last_message := str(pending_result.get("message", "Aguardando confirmacao da placa."))
+			for attempt in range(REMOTE_PENDING_CONFIRMATION_ATTEMPTS + 2):
+				if attempt > 0:
+					await get_tree().create_timer(REMOTE_PENDING_CONFIRMATION_DELAY_SECONDS).timeout
+				var confirmation := await _verify_modern_vehicle_registration(serial, plate)
+				if bool(confirmation.get("ok", false)):
+					var resumed := pending_result.duplicate(true)
+					resumed["ok"] = true
+					resumed.erase("confirmation_pending")
+					resumed["partial"] = false
+					resumed["api_vehicle"] = true
+					resumed["full_verification"] = confirmation
+					request.erase("_smart_confirmation_pending")
+					resumed["request"] = request
+					return resumed
+				last_message = str(confirmation.get("message", last_message))
+			var unresolved := pending_result.duplicate(true)
+			unresolved["ok"] = true
+			unresolved["partial"] = true
+			unresolved["confirmation_pending"] = true
+			unresolved["message"] = "%s A confirmacao sera retomada automaticamente sem repetir a operacao." % last_message
+			unresolved["request"] = request
+			return unresolved
+	return pending_result
 
 
 func _register_or_find_modern_equipment(request: Dictionary) -> Dictionary:
@@ -39218,6 +39319,40 @@ func _ensure_firebase_modification_saved(serial: String = "", expected_product: 
 	}
 
 
+func _ensure_firebase_registration_saved(serial: String = "", expected_product: Dictionary = {}) -> Dictionary:
+	"""Persiste e rele a inclusao do cadastro antes de liberar a fila.
+
+	O cadastro remoto pode ser confirmado antes da sincronizacao do espelho. A
+	operacao so deve aparecer como concluida quando a escrita do Firebase e a
+	leitura da mesma serie tiverem sido confirmadas.
+	"""
+	if store == null:
+		return {"ok": false, "message": "A base operacional nao esta disponivel para salvar o cadastro no Firebase."}
+	var firebase_sync := _firebase_sync()
+	if firebase_sync == null or not firebase_sync.has_method("sync_now"):
+		return {"ok": false, "message": "O sincronizador do Firebase nao esta disponivel; o cadastro remoto foi preservado como pendente."}
+	var synced: Variant = await firebase_sync.call("sync_now")
+	var status: Dictionary = synced as Dictionary if typeof(synced) == TYPE_DICTIONARY else {}
+	if not bool(status.get("ok", false)):
+		return {
+			"ok": false,
+			"message": "O cadastro remoto foi confirmado, mas o Firebase recusou ou nao concluiu a gravacao.",
+			"status": status,
+		}
+	if not expected_product.is_empty() and firebase_sync.has_method("verify_product_persisted"):
+		var verification: Variant = await firebase_sync.call("verify_product_persisted", serial, expected_product)
+		var verified: Dictionary = verification as Dictionary if typeof(verification) == TYPE_DICTIONARY else {}
+		if not bool(verified.get("ok", false)):
+			return {
+				"ok": false,
+				"message": str(verified.get("message", "O Firebase nao confirmou a leitura do cadastro.")),
+				"status": status,
+				"verification": verified,
+			}
+		return {"ok": true, "status": status, "verification": verified, "serial": serial}
+	return {"ok": true, "status": status, "serial": serial}
+
+
 func _choose_modern_grupo_rs_equipment_row_by_serial_exact(rows: Array[Dictionary], serial: String) -> Dictionary:
 	var target := _search_key(serial)
 	var selected: Dictionary = {}
@@ -39562,12 +39697,12 @@ func _show_vehicle_reassignment_password_dialog(request: Dictionary) -> void:
 
 
 func _on_remote_operation_localized(kind: String, serial: String) -> void:
-	if kind != "Modificacao":
-		_refresh_table()
-		return
 	var clean_serial := _digits_only(serial)
 	var current_serial := _digits_only(_field_text("imei")) if form_fields.has("imei") else ""
-	# A fila conclui a modificacao enquanto o formulario ainda esta aberto.
+	# A fila conclui a operacao enquanto o formulario ainda esta aberto. Para
+	# cadastro e modificacao, voltar para a lista evita deixar o operador preso
+	# em uma tela com "confirmacao pendente" depois que a API e o Firebase ja
+	# confirmaram a mesma serie.
 	# Nessa situacao editing_sku pode estar vazio (por exemplo, aparelho
 	# legado/inicializado fora do Firebase), portanto a presenca de um campo IMEI
 	# e a evidencia mais confiavel de que devemos voltar para a lista.

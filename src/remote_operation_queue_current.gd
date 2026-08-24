@@ -156,10 +156,20 @@ func _run(job: Dictionary) -> void:
 	if kind == "Cadastro":
 		_update(id, "Cadastro do equipamento", "API principal consultando chip, telefone e APN")
 		result = await host.call("_perform_equipment_registration", request)
+		var registration_confirmation_pending: bool = bool(result.get("confirmation_pending", false))
+		if registration_confirmation_pending and typeof(result.get("request", {})) == TYPE_DICTIONARY:
+			request.merge(result.get("request", {}) as Dictionary, true)
+		# Respostas aceitas ainda podem chegar antes de a listagem ficar
+		# consistente. Releia a entidade e retome o fluxo sem repetir POST.
+		if registration_confirmation_pending and host.has_method("_retry_pending_equipment_registration"):
+			_update(id, "Confirmando cadastro e vinculo", "Aguardando leitura da API", "running", "API principal")
+			var resumed_variant: Variant = await host.call("_retry_pending_equipment_registration", request, result)
+			if typeof(resumed_variant) == TYPE_DICTIONARY:
+				result = resumed_variant as Dictionary
+				if typeof(result.get("request", {})) == TYPE_DICTIONARY:
+					request.merge(result.get("request", {}) as Dictionary, true)
+			registration_confirmation_pending = bool(result.get("confirmation_pending", false))
 		if bool(result.get("ok", false)):
-			var registration_confirmation_pending := bool(result.get("confirmation_pending", false))
-			if registration_confirmation_pending and typeof(result.get("request", {})) == TYPE_DICTIONARY:
-				request.merge(result.get("request", {}) as Dictionary, true)
 			_update(
 				id,
 				"Confirmacao pendente" if registration_confirmation_pending else "Confirmando placa e vinculo",
@@ -174,6 +184,13 @@ func _run(job: Dictionary) -> void:
 				var local_result: Dictionary = await host.call("_finalize_local_equipment_registration", local_product, request)
 				if not bool(local_result.get("ok", false)):
 					result = {"ok": false, "message": str(local_result.get("message", "Falha ao atualizar o cadastro local."))}
+				elif host.has_method("_ensure_firebase_registration_saved"):
+					var firebase_variant: Variant = await host.call("_ensure_firebase_registration_saved", serial, local_result.get("product", {}) as Dictionary)
+					var firebase_result: Dictionary = firebase_variant as Dictionary if typeof(firebase_variant) == TYPE_DICTIONARY else {}
+					if not bool(firebase_result.get("ok", false)):
+						result = {"ok": false, "message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao do cadastro.")), "firebase_pending": true}
+					else:
+						result["firebase"] = firebase_result
 	else:
 		_update(id, "Consultando o aparelho", "API principal")
 		result = await host.call("_perform_equipment_modification", request, null)
@@ -193,8 +210,6 @@ func _run(job: Dictionary) -> void:
 						result = {"ok": false, "message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao da modificacao.")), "firebase_pending": true}
 					else:
 						result["firebase"] = firebase_result
-					if bool(result.get("ok", false)) and host.has_method("_on_remote_operation_localized"):
-						host.call_deferred("_on_remote_operation_localized", kind, serial)
 	if bool(result.get("ok", false)):
 		var confirmation_pending := bool(result.get("confirmation_pending", false))
 		_finish(
@@ -208,6 +223,8 @@ func _run(job: Dictionary) -> void:
 			_log_remote_operation_event(kind, serial, result, id, started_at, true)
 		else:
 			_log_remote_operation_event(kind, serial, result, id, started_at, false)
+			if host.has_method("_on_remote_operation_localized"):
+				host.call_deferred("_on_remote_operation_localized", kind, serial)
 	else:
 		var message := str(result.get("message", "A operacao remota nao foi confirmada."))
 		_finish(id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API principal")
