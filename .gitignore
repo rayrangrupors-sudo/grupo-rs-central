@@ -1,3 +1,23 @@
+# Generic compiled artifacts
+*.d
+*.slo
+*.lo
+*.o
+*.obj
+*.gch
+*.pch
+*.so
+*.dylib
+*.dll
+*.mod
+*.smod
+*.lai
+*.la
+*.a
+*.lib
+*.out
+*.app
+
 # Godot 4+ specific ignores
 .godot/
 /android/
