@@ -1,0 +1,23 @@
+# Índice de funções da Localização
+
+- `_setup_st310_location_poll_timer`: configura o ciclo de atualização.
+- `_show_vehicle_location_monitor`: abre a funcionalidade sem reiniciar o app.
+- `_build_vehicle_location_view`: monta filtros, mapa, detalhes e lista.
+- `_make_location_metric_card`: cria um indicador resumido.
+- `_refresh_vehicle_location_view`: coordena consulta e preserva posição válida.
+- `_clone_location_rows`: duplica resultados sem compartilhar estado mutável.
+- `_location_row_key`: cria a identidade estável de uma linha.
+- `_merge_last_valid_positions`: mantém a última coordenada com aviso de atraso.
+- `_location_coordinates_valid`: valida a presença de latitude/longitude.
+- `_has_valid_location_row`: detecta ao menos uma posição utilizável.
+- `_update_location_runtime_banner`: atualiza fonte, latência e resumo.
+- `_location_age_text`: converte a data em idade legível.
+- `_location_device_status`: classifica o estado básico do equipamento.
+- `_location_monitoring_status`: delega a regra oficial de comunicação.
+- `_set_location_communication_state`: grava texto e cor no mesmo resultado.
+- `_update_vehicle_location_summary`: recalcula os indicadores da tela.
+- `_make_vehicle_location_row`: monta uma linha selecionável.
+- `_make_location_row_label`: padroniza células da lista.
+- `_render_vehicle_location_details`: apresenta os dados do selecionado.
+- `_center_vehicle_location_selected`: centraliza a câmera no veículo.
+- `_make_location_detail_line`: padroniza campos do painel de detalhes.

@@ -11,7 +11,7 @@ const BLUE_SOFT := Color("#EAF5FD")
 const GREEN := Color("#12A86B")
 const ORANGE := Color("#F59A23")
 const SIDEBAR_WIDTH := 224.0
-const TOPBAR_HEIGHT := 70.0
+const TOPBAR_HEIGHT := 92.0
 
 
 static func surface(

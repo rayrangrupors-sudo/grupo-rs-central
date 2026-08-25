@@ -3,6 +3,7 @@ extends Node
 const AuthModule := preload("res://src/modules/auth_module.gd")
 const StockModule := preload("res://src/modules/stock_module.gd")
 const Monitor4GModule := preload("res://src/modules/monitor_4g_module.gd")
+const BigMapModule := preload("res://src/modules/big_map_module.gd")
 const SmsModule := preload("res://src/modules/sms_module.gd")
 
 var _modules: Dictionary = {}
@@ -12,6 +13,7 @@ func _ready() -> void:
 	register_module("auth", AuthModule.new())
 	register_module("stock", StockModule.new())
 	register_module("monitor_4g", Monitor4GModule.new())
+	register_module("big_map", BigMapModule.new())
 	register_module("sms", SmsModule.new())
 
 

@@ -42,6 +42,11 @@ const NAV_FONT := preload("res://assets/fonts/Noto_Sans/static/NotoSans-BoldItal
 const ErrorDialog = preload("res://src/ErrorDialog.gd")
 const RemoteOperationQueueScript := preload("res://src/remote_operation_queue_current.gd")
 const ST310DecoderScript := preload("res://src/st310_decoder.gd")
+const BigMapConfig := preload("res://src/features/big_map/big_map_config.gd")
+const BigMapProjection := preload("res://src/features/big_map/map_projection.gd")
+const BigMapRegionService := preload("res://src/features/big_map/map_region_service.gd")
+const BigMapTileProvider := preload("res://src/features/big_map/map_tile_provider.gd")
+const VehicleLocationIntegration := preload("res://src/features/location/vehicle_location_integration.gd")
 
 const AUTH_CONFIG_PATH := "user://auth_config.json"
 const SETTINGS_PATH := "user://app_settings.json"
@@ -74,17 +79,7 @@ const SMART_4G_GEOCODE_CACHE_SECONDS := 900
 const SMART_4G_RECORD_LOOKBACK_SECONDS := 7200
 const SMART_4G_RECORD_FUTURE_SECONDS := 600
 const SMART_4G_OPERATOR_CACHE_SECONDS := 86400
-const SMART_4G_MAP_REGION_CATALOG := [
-	{"id": "imperatriz", "label": "Imperatriz - MA", "lat": -5.5264, "lng": -47.4919, "zoom": 13, "radius_km": 16.0},
-	{"id": "joao_lisboa", "label": "Joao Lisboa - MA", "lat": -5.4436, "lng": -47.4064, "zoom": 12, "radius_km": 24.0},
-	{"id": "davinopolis", "label": "Davinopolis - MA", "lat": -5.5464, "lng": -47.4216, "zoom": 12, "radius_km": 24.0},
-	{"id": "senador_la_rocque", "label": "Senador La Rocque - MA", "lat": -5.4461, "lng": -47.2958, "zoom": 12, "radius_km": 28.0},
-	{"id": "governador_edison_lobao", "label": "Governador Edison Lobao - MA", "lat": -5.7497, "lng": -47.3642, "zoom": 12, "radius_km": 30.0},
-	{"id": "ribamar_fiquene", "label": "Ribamar Fiquene - MA", "lat": -5.9307, "lng": -47.3888, "zoom": 12, "radius_km": 32.0},
-	{"id": "acailandia", "label": "Acailandia - MA", "lat": -4.9470, "lng": -47.5004, "zoom": 11, "radius_km": 42.0},
-	{"id": "porto_franco", "label": "Porto Franco - MA", "lat": -6.3383, "lng": -47.3996, "zoom": 11, "radius_km": 42.0},
-	{"id": "estreito", "label": "Estreito - MA", "lat": -6.5608, "lng": -47.4470, "zoom": 11, "radius_km": 42.0},
-]
+const SMART_4G_MAP_REGION_CATALOG := BigMapConfig.REGIONS
 const DASHBOARD_COMMUNICATION_REFRESH_SECONDS := 60.0
 const DASHBOARD_COMMUNICATION_DETAIL_PAGE_SIZE := 10
 const DASHBOARD_COMMUNICATION_REQUEST_TIMEOUT_SECONDS := 8.0
@@ -227,7 +222,9 @@ const LINKSOLUTIONS_FAST_QUERY_TIMEOUT_SECONDS := 8.0
 const REGISTRATION_CHIP_LOOKUP_DEADLINE_SECONDS := 12.0
 const LINKSOLUTIONS_RETRY_DELAY_SECONDS := 0.6
 const LINKSOLUTIONS_FAILURE_CACHE_SECONDS := 20
-const OSM_TILE_URL := "https://tile.openstreetmap.org/%d/%d/%d.png"
+# Compatibilidade temporária: chamadas antigas usam este nome, enquanto a
+# configuração real pertence ao módulo do Mapa Grande.
+const OSM_TILE_URL := BigMapConfig.TILE_URL_TEMPLATE
 const OSM_GEOCODE_URL := "https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=1&countrycodes=br&accept-language=pt-BR&q=%s"
 const RS300_TIME_PROFILE := "3600;60;60;1;0;300;0;0;0"
 const RS300_TIME_CMD := "AT+SMS=ST300RPT;xxxxxxxxx;02;" + RS300_TIME_PROFILE
@@ -337,7 +334,7 @@ class ServerHealthCore:
 	const ANIMATION_INTERVAL_SECONDS := 0.08
 
 	func _ready() -> void:
-		custom_minimum_size = Vector2(300, 225)
+		custom_minimum_size = Vector2(300, 190)
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
 		set_process(true)
 
@@ -812,1037 +809,7 @@ class Smart4GDonutChart:
 			start_angle += sweep
 
 
-class Smart4GMapCanvas:
-	extends Control
-
-	signal navigation_requested(latitude: float, longitude: float, zoom: int)
-	signal reset_requested
-	signal station_selected(station: Dictionary)
-	signal tracking_selected(location: Dictionary)
-
-	var devices: Array[Dictionary] = []
-	var coverage_cells: Array[Dictionary] = []
-	var stations: Array[Dictionary] = []
-	var tracking_locations: Array[Dictionary] = []
-	# Marcador opcional usado pelo Mapa Grande quando uma placa e pesquisada
-	# enquanto o modo ERB esta ativo. As torres continuam sendo desenhadas
-	# normalmente; a agulha fica sobreposta somente para indicar o veiculo.
-	var searched_location: Dictionary = {}
-	var selected_index := -1
-	var selected_cell_index := -1
-	var selected_station_index := -1
-	var selected_tracking_index := -1
-	var map_texture: Texture2D
-	var map_zoom := 15
-	var map_top_left := Vector2.ZERO
-	var map_viewport_size := Vector2.ZERO
-	var city_label := "Imperatriz - MA"
-	var coverage_mode := "best"
-	var analyzed_operator := "CLARO"
-	var generation := "4G"
-	var dataset_updated_at := "--"
-	var map_ready := false
-	var map_error := ""
-	var loading_stage := "Preparando mapa e cobertura"
-	var loading_phase := 0.0
-	var show_stations := true
-	var tracking_mode := false
-	var load_generation := 0
-	var navigation_loading := false
-	var dragging := false
-	var drag_start := Vector2.ZERO
-	var drag_offset := Vector2.ZERO
-	var drag_distance := 0.0
-	var visible_map_tiles: Dictionary = {}
-	var map_tile_loaded_count := 0
-	var map_tile_total_count := 0
-	var map_tile_size := 256
-	var tracking_motion: Dictionary = {}
-	# Agulhas vetoriais de localização: o mesmo componente visual é usado nas
-	# telas Localização e Mapa de ERB's, mantendo a leitura de estado consistente.
-	const LOCATION_PIN_GREEN: Texture2D = preload("res://assets/icons/agulha_localizacao_verde.svg")
-	const LOCATION_PIN_YELLOW: Texture2D = preload("res://assets/icons/agulha_localizacao_amarela.svg")
-	const LOCATION_PIN_RED: Texture2D = preload("res://assets/icons/agulha_localizacao_vermelha.svg")
-
-	const MIN_MAP_ZOOM := 12
-	const MAX_MAP_ZOOM := 17
-	const MAP_CONTROL_SIZE := 36.0
-	const MAP_CONTROL_GAP := 5.0
-	const TRACKING_ANIMATION_DURATION_MSEC := 850.0
-
-	func _init() -> void:
-		custom_minimum_size = Vector2(720, 330)
-		mouse_filter = Control.MOUSE_FILTER_STOP
-		clip_contents = true
-		mouse_default_cursor_shape = Control.CURSOR_DRAG
-		set_process(_tracking_animation_in_progress())
-
-	func _process(delta: float) -> void:
-		if map_ready and not navigation_loading and not _tracking_animation_in_progress():
-			set_process(false)
-			return
-		loading_phase = fmod(loading_phase + delta * 0.85, 1.0)
-		queue_redraw()
-
-	func set_devices(next_devices: Array[Dictionary]) -> void:
-		# O Monitor 4G usa somente a malha Anatel; nenhum aparelho e consultado ou desenhado aqui.
-		devices.clear()
-		selected_index = -1
-		queue_redraw()
-
-	func set_tracking_locations(next_locations: Array[Dictionary]) -> void:
-		var previous_motion: Dictionary = {}
-		for previous_index in range(tracking_locations.size()):
-			var previous_location := tracking_locations[previous_index]
-			var previous_key := _tracking_location_key(previous_location, previous_index)
-			previous_motion[previous_key] = _tracking_display_geo(previous_index, previous_location)
-		var now_msec := Time.get_ticks_msec()
-		var next_motion: Dictionary = {}
-		tracking_locations.clear()
-		for location_index in range(next_locations.size()):
-			var location := next_locations[location_index].duplicate(true)
-			tracking_locations.append(location)
-			var target_geo := _tracking_target_geo(location)
-			if is_zero_approx(target_geo.x) and is_zero_approx(target_geo.y):
-				continue
-			var location_key := _tracking_location_key(location, location_index)
-			var start_geo: Vector2 = previous_motion.get(location_key, target_geo)
-			if start_geo.distance_to(target_geo) > 0.000001:
-				next_motion[location_key] = {
-					"from": start_geo,
-					"to": target_geo,
-					"started_msec": now_msec,
-					"duration_msec": TRACKING_ANIMATION_DURATION_MSEC,
-				}
-		tracking_motion = next_motion
-		selected_tracking_index = -1
-		if map_ready and _tracking_animation_in_progress():
-			set_process(true)
-		queue_redraw()
-
-	func set_searched_location(location: Dictionary) -> void:
-		searched_location = location.duplicate(true) if not location.is_empty() else {}
-		queue_redraw()
-
-	func clear_searched_location() -> void:
-		searched_location.clear()
-		queue_redraw()
-
-	func _tracking_location_key(location: Dictionary, location_index: int) -> String:
-		for field in ["vehicle_id", "equipment_id", "serial", "plate"]:
-			var value := str(location.get(field, "")).strip_edges()
-			if value != "":
-				return "%s:%s" % [field, value.to_lower()]
-		return "index:%d" % location_index
-
-	func _tracking_target_geo(location: Dictionary) -> Vector2:
-		return Vector2(
-			float(str(location.get("lat", "0"))),
-			float(str(location.get("lng", "0"))),
-		)
-
-	func _searched_location_geo() -> Vector2:
-		if searched_location.is_empty():
-			return Vector2.ZERO
-		var latitude := str(searched_location.get("lat", searched_location.get("latitude", "0"))).replace(",", ".")
-		var longitude := str(searched_location.get("lng", searched_location.get("lon", searched_location.get("longitude", "0")))).replace(",", ".")
-		return Vector2(float(latitude), float(longitude))
-
-	func _tracking_display_geo(location_index: int, location: Dictionary) -> Vector2:
-		var target_geo := _tracking_target_geo(location)
-		var location_key := _tracking_location_key(location, location_index)
-		var motion: Dictionary = tracking_motion.get(location_key, {})
-		if motion.is_empty():
-			return target_geo
-		var from_geo: Vector2 = motion.get("from", target_geo)
-		var to_geo: Vector2 = motion.get("to", target_geo)
-		var duration := maxf(float(motion.get("duration_msec", TRACKING_ANIMATION_DURATION_MSEC)), 1.0)
-		var elapsed := float(Time.get_ticks_msec() - int(motion.get("started_msec", 0)))
-		return from_geo.lerp(to_geo, clampf(elapsed / duration, 0.0, 1.0))
-
-	func _tracking_animation_in_progress() -> bool:
-		if tracking_motion.is_empty():
-			return false
-		var now_msec := Time.get_ticks_msec()
-		for motion_value in tracking_motion.values():
-			var motion: Dictionary = motion_value
-			var from_geo: Vector2 = motion.get("from", Vector2.ZERO)
-			var to_geo: Vector2 = motion.get("to", from_geo)
-			var duration := maxf(float(motion.get("duration_msec", TRACKING_ANIMATION_DURATION_MSEC)), 1.0)
-			var elapsed := float(now_msec - int(motion.get("started_msec", 0)))
-			if elapsed < duration and from_geo.distance_to(to_geo) > 0.000001:
-				return true
-		return false
-
-	func _tracking_map_position(location_index: int, location: Dictionary) -> Vector2:
-		var display_geo := _tracking_display_geo(location_index, location)
-		return _map_position(display_geo.x, display_geo.y)
-
-	func set_tracking_mode(enabled: bool) -> void:
-		tracking_mode = enabled
-		selected_tracking_index = -1
-		queue_redraw()
-
-	func current_map_view() -> Dictionary:
-		# Atualizacoes de dados devem trocar apenas os marcadores. Expor o
-		# enquadramento atual permite que a consulta seguinte reutilize exatamente
-		# o centro e o zoom escolhidos pelo usuario.
-		if not map_ready or map_viewport_size.x <= 0.0 or map_viewport_size.y <= 0.0:
-			return {}
-		var center_world := _screen_to_world(size * 0.5)
-		var center_geo := _world_pixel_to_lat_lng(center_world, map_zoom)
-		return {
-			"center": {"lat": center_geo.x, "lng": center_geo.y},
-			"zoom": map_zoom,
-			"interactive": true,
-		}
-
-	func set_coverage_profile(profile: Dictionary) -> void:
-		coverage_cells.clear()
-		stations.clear()
-		var next_stations: Variant = profile.get("stations", [])
-		if typeof(next_stations) == TYPE_ARRAY:
-			for station in next_stations as Array:
-				if typeof(station) == TYPE_DICTIONARY:
-					stations.append((station as Dictionary).duplicate(true))
-		coverage_mode = str(profile.get("mode", "best"))
-		analyzed_operator = str(profile.get("selected_operator", "CLARO"))
-		generation = str(profile.get("generation", "4G"))
-		var profile_metadata: Dictionary = profile.get("metadata", {})
-		dataset_updated_at = str(profile_metadata.get(
-			"source_last_modified",
-			profile_metadata.get("generated_at", "--")
-		))
-		selected_cell_index = -1
-		selected_station_index = -1
-		queue_redraw()
-
-	func select_station_by_id(station_id: String) -> void:
-		selected_station_index = -1
-		var target := station_id.strip_edges()
-		if target != "":
-			for index in range(stations.size()):
-				var station := stations[index]
-				if str(station.get("id", station.get("code", ""))).strip_edges() == target:
-					selected_station_index = index
-					break
-		queue_redraw()
-
-	func select_tracking_by_key(key: String) -> void:
-		selected_tracking_index = -1
-		var target := key.strip_edges()
-		if target != "":
-			for index in range(tracking_locations.size()):
-				var location := tracking_locations[index]
-				var candidate := str(location.get("serial", location.get("plate", ""))).strip_edges()
-				if candidate == target:
-					selected_tracking_index = index
-					break
-		queue_redraw()
-
-	func set_map_texture(texture: Texture2D, zoom: int, top_left: Vector2, viewport_size: Vector2) -> void:
-		map_texture = texture
-		visible_map_tiles.clear()
-		map_zoom = zoom
-		map_top_left = top_left
-		map_viewport_size = viewport_size
-		map_ready = texture != null and viewport_size.x > 0.0 and viewport_size.y > 0.0
-		map_error = ""
-		navigation_loading = false
-		set_process(_tracking_animation_in_progress())
-		dragging = false
-		drag_offset = Vector2.ZERO
-		drag_distance = 0.0
-		queue_redraw()
-
-	func set_map_view(
-		tiles: Array[Dictionary],
-		zoom: int,
-		top_left: Vector2,
-		viewport_size: Vector2,
-		loaded_count: int,
-		total_count: int
-	) -> void:
-		map_texture = null
-		visible_map_tiles.clear()
-		for tile in tiles:
-			var key := str(tile.get("key", ""))
-			if key != "":
-				visible_map_tiles[key] = tile.duplicate(true)
-		map_zoom = zoom
-		map_top_left = top_left
-		map_viewport_size = viewport_size
-		map_tile_loaded_count = loaded_count
-		map_tile_total_count = total_count
-		map_ready = viewport_size.x > 0.0 and viewport_size.y > 0.0
-		map_error = ""
-		navigation_loading = loaded_count < total_count
-		set_process(navigation_loading or _tracking_animation_in_progress())
-		dragging = false
-		drag_offset = Vector2.ZERO
-		drag_distance = 0.0
-		queue_redraw()
-
-	func set_map_tile(key: String, tile_x: int, tile_y: int, texture: Texture2D) -> void:
-		if texture == null or key == "":
-			return
-		visible_map_tiles[key] = {
-			"key": key,
-			"x": tile_x,
-			"y": tile_y,
-			"texture": texture,
-		}
-		map_tile_loaded_count += 1
-		navigation_loading = map_tile_loaded_count < map_tile_total_count
-		set_process(navigation_loading or _tracking_animation_in_progress())
-		queue_redraw()
-
-	func finish_map_tile_load(loaded_count: int, total_count: int) -> void:
-		map_tile_loaded_count = loaded_count
-		map_tile_total_count = total_count
-		navigation_loading = false
-		set_process(_tracking_animation_in_progress())
-		queue_redraw()
-
-	func set_map_tile_progress(loaded_count: int, total_count: int, stage: String) -> void:
-		map_tile_loaded_count = loaded_count
-		map_tile_total_count = total_count
-		loading_stage = stage
-		navigation_loading = loaded_count < total_count
-		set_process(navigation_loading or _tracking_animation_in_progress())
-		queue_redraw()
-
-	func begin_map_load(
-		stage: String = "Carregando mapa e analisando cobertura",
-		preserve_current_map: bool = false
-	) -> int:
-		load_generation += 1
-		navigation_loading = preserve_current_map and map_ready
-		if not navigation_loading:
-			map_ready = false
-			map_texture = null
-			visible_map_tiles.clear()
-		map_error = ""
-		loading_stage = stage
-		set_process(true)
-		queue_redraw()
-		return load_generation
-
-	func set_loading_stage(stage: String, preserve_current_map: bool = false) -> void:
-		if preserve_current_map:
-			navigation_loading = map_ready
-		else:
-			# A scan de dados nao deve desmontar um mapa que ja esta navegavel.
-			navigation_loading = false
-		set_process(navigation_loading or _tracking_animation_in_progress())
-		map_error = ""
-		loading_stage = stage
-		queue_redraw()
-
-	func is_load_current(generation: int) -> bool:
-		return generation == load_generation
-
-	func set_map_error(message: String) -> void:
-		load_generation += 1
-		map_ready = false
-		map_error = message.strip_edges()
-		navigation_loading = false
-		set_process(false)
-		dragging = false
-		drag_offset = Vector2.ZERO
-		queue_redraw()
-
-	func cancel_navigation_load(message: String = "") -> void:
-		load_generation += 1
-		navigation_loading = false
-		set_process(false)
-		dragging = false
-		drag_offset = Vector2.ZERO
-		map_error = message.strip_edges()
-		queue_redraw()
-
-	func set_station_visibility(visible: bool) -> void:
-		show_stations = visible
-		queue_redraw()
-
-	func set_city_label(value: String) -> void:
-		city_label = value.strip_edges() if value.strip_edges() != "" else "Cidade nao informada"
-		queue_redraw()
-
-	func _gui_input(event: InputEvent) -> void:
-		if event is InputEventMouseButton:
-			var mouse_event := event as InputEventMouseButton
-			if not map_ready:
-				return
-			if mouse_event.pressed and mouse_event.button_index == MOUSE_BUTTON_WHEEL_UP:
-				_request_zoom(mouse_event.position, 1)
-				accept_event()
-				return
-			if mouse_event.pressed and mouse_event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-				_request_zoom(mouse_event.position, -1)
-				accept_event()
-				return
-			if mouse_event.button_index != MOUSE_BUTTON_LEFT:
-				return
-			if mouse_event.pressed:
-				var control_action := _map_control_action(mouse_event.position)
-				if control_action != "":
-					_activate_map_control(control_action)
-					accept_event()
-					return
-				dragging = true
-				drag_start = mouse_event.position
-				drag_distance = 0.0
-				mouse_default_cursor_shape = Control.CURSOR_MOVE
-				accept_event()
-				return
-			if not dragging:
-				return
-			dragging = false
-			mouse_default_cursor_shape = Control.CURSOR_DRAG
-			if drag_distance < 6.0:
-				drag_offset = Vector2.ZERO
-				if tracking_mode:
-					selected_tracking_index = _nearest_tracking_index(mouse_event.position)
-					tracking_selected.emit(
-						tracking_locations[selected_tracking_index].duplicate(true)
-						if selected_tracking_index >= 0
-						else {}
-					)
-					queue_redraw()
-					return
-				selected_station_index = _nearest_station_index(mouse_event.position)
-				station_selected.emit(
-					stations[selected_station_index].duplicate(true)
-					if selected_station_index >= 0
-					else {}
-				)
-				queue_redraw()
-				return
-			_request_pan_navigation()
-			accept_event()
-		elif event is InputEventMouseMotion and dragging and map_ready:
-			var motion_event := event as InputEventMouseMotion
-			drag_offset = motion_event.position - drag_start
-			drag_distance = maxf(drag_distance, drag_offset.length())
-			selected_cell_index = -1
-			selected_station_index = -1
-			queue_redraw()
-			accept_event()
-
-	func _nearest_station_index(point: Vector2) -> int:
-		var nearest := -1
-		var nearest_distance := INF
-		for station_index in range(stations.size()):
-			var station: Dictionary = stations[station_index]
-			var position := _map_position(float(station.get("lat", 0.0)), float(station.get("lng", 0.0)))
-			if position.x < 4.0 or position.y < 4.0 or position.x > size.x - 4.0 or position.y > size.y - 4.0:
-				continue
-			var radius := 18.0
-			var distance := position.distance_to(point)
-			if distance > radius or distance >= nearest_distance:
-				continue
-			nearest_distance = distance
-			nearest = station_index
-		return nearest
-
-	func _nearest_tracking_index(point: Vector2) -> int:
-		var nearest_group: Dictionary = {}
-		var nearest_distance := INF
-		for group_value in _tracking_visual_groups():
-			var group: Dictionary = group_value
-			var position: Vector2 = group.get("position", Vector2(-10000, -10000))
-			if position.x < 4.0 or position.y < 4.0 or position.x > size.x - 4.0 or position.y > size.y - 4.0:
-				continue
-			var distance := position.distance_to(point)
-			if distance > 30.0 or distance >= nearest_distance:
-				continue
-			nearest_distance = distance
-			nearest_group = group
-		if nearest_group.is_empty():
-			return -1
-		var indices: Array = nearest_group.get("indices", [])
-		if indices.is_empty():
-			return -1
-		# Quando vários aparelhos ocupam a mesma coordenada, cada clique no
-		# agrupamento avança para o próximo aparelho em vez de deixar somente o
-		# último marcador desenhado selecionável.
-		var current_position := indices.find(selected_tracking_index)
-		if current_position >= 0:
-			return int(indices[(current_position + 1) % indices.size()])
-		return int(indices[0])
-
-	func _tracking_visual_groups() -> Array:
-		var groups: Array = []
-		for location_index in range(tracking_locations.size()):
-			var location := tracking_locations[location_index]
-			var target_geo := _tracking_target_geo(location)
-			if is_zero_approx(target_geo.x) and is_zero_approx(target_geo.y):
-				continue
-			var position := _tracking_map_position(location_index, location)
-			if position.x < -24.0 or position.y < -24.0 or position.x > size.x + 24.0 or position.y > size.y + 24.0:
-				continue
-			var matching_group := -1
-			for group_index in range(groups.size()):
-				var candidate: Dictionary = groups[group_index]
-				var candidate_position: Vector2 = candidate.get("position", Vector2.ZERO)
-				if candidate_position.distance_to(position) <= 24.0:
-					matching_group = group_index
-					break
-			if matching_group < 0:
-				groups.append({"indices": [location_index], "position": position})
-				continue
-			var group: Dictionary = groups[matching_group]
-			var indices: Array = group.get("indices", [])
-			var current_group_position: Vector2 = group.get("position", Vector2.ZERO)
-			indices.append(location_index)
-			group["indices"] = indices
-			# Recalcula o centro para que a bolha fique entre os aparelhos quando
-			# eles estiverem muito próximos, mas não exatamente no mesmo ponto.
-			group["position"] = (current_group_position * float(indices.size() - 1) + position) / float(indices.size())
-			groups[matching_group] = group
-		return groups
-
-	func _draw() -> void:
-		if not map_ready:
-			_draw_loading_state()
-			return
-		draw_rect(Rect2(Vector2.ZERO, size), Color("#eef4f8"), true)
-		var drawn_tiles := 0
-		for tile_value in visible_map_tiles.values():
-			if typeof(tile_value) != TYPE_DICTIONARY:
-				continue
-			var tile := tile_value as Dictionary
-			var texture: Texture2D = tile.get("texture") as Texture2D
-			if texture == null:
-				continue
-			var tile_position := Vector2(
-				float(tile.get("x", 0)) * float(map_tile_size) - map_top_left.x,
-				float(tile.get("y", 0)) * float(map_tile_size) - map_top_left.y
-			) + drag_offset
-			draw_texture_rect(
-				texture,
-				Rect2(tile_position, Vector2(map_tile_size, map_tile_size)),
-				false
-			)
-			drawn_tiles += 1
-		if drawn_tiles == 0:
-			draw_rect(Rect2(Vector2.ZERO, size), Color("#eef4f8"), true)
-		draw_rect(Rect2(Vector2.ZERO, size), Color(1, 1, 1, 0.025), true)
-		var font := get_theme_default_font()
-		# A tela de Localizacao usa somente os aparelhos retornados pela API. Nao
-		# exiba aqui o estado vazio do catalogo de ERBs, pois ele nao representa
-		# uma falha de rastreamento e acaba cobrindo os marcadores.
-		if stations.is_empty() and show_stations:
-			draw_string(font, Vector2(size.x * 0.5 - 190.0, size.y * 0.48), "Nenhuma ERB Anatel encontrada nesta area", HORIZONTAL_ALIGNMENT_CENTER, 380.0, 15, Color("#657487"))
-		if show_stations:
-			# Keep every tower visible as an individual marker. The map no longer
-			# replaces nearby towers with count bubbles, so each ERB remains
-			# directly selectable and the legend keeps its normal meaning.
-			for station_index in range(stations.size()):
-				_draw_station_marker(stations[station_index], station_index)
-		if not tracking_mode and not searched_location.is_empty():
-			_draw_searched_location()
-		if tracking_mode:
-			for group_value in _tracking_visual_groups():
-				var group: Dictionary = group_value
-				var indices: Array = group.get("indices", [])
-				if indices.size() > 1:
-					_draw_tracking_cluster_marker(group)
-				elif not indices.is_empty():
-					var location_index := int(indices[0])
-					_draw_tracking_marker(tracking_locations[location_index], location_index)
-			_draw_tracking_legend()
-		else:
-			_draw_map_legend()
-		draw_string(font, Vector2(18, size.y - 18), "OpenStreetMap contributors", HORIZONTAL_ALIGNMENT_LEFT, 300.0, 11, Color("#657487"))
-		_draw_map_scale()
-		_draw_map_controls()
-		if navigation_loading:
-			_draw_navigation_loading()
-
-	func _draw_loading_state() -> void:
-		draw_rect(Rect2(Vector2.ZERO, size), Color("#eef4f8"), true)
-		var center := size * 0.5
-		var font := get_theme_default_font()
-		if map_error != "":
-			draw_circle(center + Vector2(0, -28), 20.0, Color("#d64545"))
-			draw_string(font, center + Vector2(-180, 25), map_error, HORIZONTAL_ALIGNMENT_CENTER, 360.0, 15, Color("#5f6d7c"))
-			return
-		draw_arc(center + Vector2(0, -22), 22.0, 0.0, TAU, 54, Color("#cfdae5"), 5.0, true)
-		var start_angle := loading_phase * TAU - PI * 0.5
-		draw_arc(center + Vector2(0, -22), 22.0, start_angle, start_angle + PI * 0.86, 26, Color("#0070b8"), 5.0, true)
-		draw_string(font, center + Vector2(-210, 31), loading_stage, HORIZONTAL_ALIGNMENT_CENTER, 420.0, 16, Color("#23364a"))
-
-	func _draw_station_marker(station: Dictionary, station_index: int = -1) -> void:
-		var position := _map_position(float(station.get("lat", 0.0)), float(station.get("lng", 0.0)))
-		if position.x < -18.0 or position.y < -18.0 or position.x > size.x + 18.0 or position.y > size.y + 18.0:
-			return
-		# Pixel snapping keeps the glyph crisp and prevents fractional-coordinate shimmer.
-		position = Vector2(roundf(position.x), roundf(position.y))
-		# ERBs usam a agulha amarela: são pontos de infraestrutura/catálogo, não
-		# veículos monitorados. O destaque azul continua indicando seleção.
-		var selected := station_index == selected_station_index
-		if selected:
-			draw_circle(position, 18.0, Color(0.0, 0.44, 0.72, 0.10))
-			draw_arc(position, 18.0, 0.0, TAU, 32, Color("#0070b8"), 1.6, true)
-		_draw_location_pin(position, LOCATION_PIN_YELLOW, selected, 0.56)
-
-	func _draw_tracking_marker(location: Dictionary, location_index: int = -1) -> void:
-		var target_geo := _tracking_target_geo(location)
-		if is_zero_approx(target_geo.x) and is_zero_approx(target_geo.y):
-			return
-		var position := _tracking_map_position(location_index, location)
-		if position.x < -22.0 or position.y < -22.0 or position.x > size.x + 22.0 or position.y > size.y + 22.0:
-			return
-		var color := _tracking_marker_color(location)
-		var selected := location_index == selected_tracking_index
-		_draw_tracking_pin(position, color, _tracking_plate_label(location), selected, 0)
-
-	func _draw_searched_location() -> void:
-		var geo := _searched_location_geo()
-		if is_zero_approx(geo.x) and is_zero_approx(geo.y):
-			return
-		var position := _map_position(geo.x, geo.y)
-		if position.x < -28.0 or position.y < -28.0 or position.x > size.x + 28.0 or position.y > size.y + 28.0:
-			return
-		var color := _tracking_marker_color(searched_location)
-		_draw_tracking_pin(position, color, _tracking_plate_label(searched_location), true, 0)
-
-	func _draw_tracking_cluster_marker(group: Dictionary) -> void:
-		var indices: Array = group.get("indices", [])
-		if indices.is_empty():
-			return
-		var position: Vector2 = group.get("position", Vector2.ZERO)
-		if position.x < -22.0 or position.y < -22.0 or position.x > size.x + 22.0 or position.y > size.y + 22.0:
-			return
-		var representative_index := int(indices[0])
-		if indices.has(selected_tracking_index):
-			representative_index = selected_tracking_index
-		var representative: Dictionary = tracking_locations[representative_index]
-		var color := _tracking_marker_color(representative)
-		var selected := indices.has(selected_tracking_index)
-		_draw_tracking_pin(position, color, _tracking_plate_label(representative), selected, indices.size())
-
-	func _tracking_plate_label(location: Dictionary) -> String:
-		var plate := str(location.get("plate", "")).strip_edges()
-		if plate == "":
-			plate = str(location.get("serial", "Aparelho")).strip_edges()
-		return plate if plate != "" else "Aparelho"
-
-	func _draw_tracking_pin(position: Vector2, color: Color, plate: String, selected: bool, badge_count: int) -> void:
-		# Pino de rastreamento moderno: etiqueta legivel, corpo colorido bem
-		# definido e um veiculo grande no centro, sem excesso de contornos.
-		var anchor := Vector2(roundf(position.x), roundf(position.y))
-		var pin_center := anchor + Vector2(0.0, -16.0)
-		var label_width := clampf(float(plate.length()) * 7.4 + 42.0, 96.0, 182.0)
-		var label_size := Vector2(label_width, 30.0)
-		var label_position := Vector2(roundf(anchor.x - label_size.x * 0.5), roundf(anchor.y - 75.0))
-		var label_style := StyleBoxFlat.new()
-		label_style.bg_color = Color("#0d263b")
-		label_style.border_color = Color("#52728a") if not selected else Color("#19a8e0")
-		label_style.set_border_width_all(1)
-		label_style.set_corner_radius_all(10)
-		label_style.shadow_color = Color(0.02, 0.08, 0.14, 0.34)
-		label_style.shadow_size = 6
-		draw_style_box(label_style, Rect2(label_position, label_size))
-		var font := get_theme_default_font()
-		draw_circle(label_position + Vector2(14.0, 15.0), 4.0, color)
-		draw_string(font, label_position + Vector2(25.0, 20.0), plate, HORIZONTAL_ALIGNMENT_LEFT, label_size.x - 32.0, 12, Color("#f7fbff"))
-		# Haste de ligacao curta e discreta entre a placa e a localizacao exata.
-		draw_line(Vector2(anchor.x, label_position.y + label_size.y), pin_center + Vector2(0.0, -23.0), Color(0.05, 0.15, 0.23, 0.55), 1.2, true)
-		if selected:
-			draw_circle(pin_center, 31.0, Color(color.r, color.g, color.b, 0.14))
-			draw_arc(pin_center, 30.0, 0.0, TAU, 48, Color("#19a8e0"), 2.0, true)
-		else:
-			draw_circle(pin_center, 26.0, Color(color.r, color.g, color.b, 0.10))
-		# A agulha SVG é vetorial e permanece nítida em qualquer zoom. O centro
-		# da agulha coincide com a coordenada real do aparelho.
-		_draw_location_pin(anchor, _location_pin_for_color(color), selected, 0.56)
-		if badge_count > 1:
-			var badge_position := pin_center + Vector2(20.0, -25.0)
-			draw_circle(badge_position + Vector2(1.0, 2.0), 12.0, Color(0.02, 0.08, 0.14, 0.28))
-			draw_circle(badge_position, 12.0, Color("#0d2941"))
-			draw_arc(badge_position, 12.0, 0.0, TAU, 24, Color.WHITE, 1.0, true)
-			draw_string(font, badge_position + Vector2(-8.0, 4.0), str(badge_count), HORIZONTAL_ALIGNMENT_CENTER, 16.0, 11, Color.WHITE)
-
-	func _location_pin_for_color(color: Color) -> Texture2D:
-		if color.g > color.r * 1.25 and color.g > color.b * 1.15:
-			return LOCATION_PIN_GREEN
-		if color.r > color.g * 1.35:
-			return LOCATION_PIN_RED
-		return LOCATION_PIN_YELLOW
-
-	func _draw_location_pin(anchor: Vector2, texture: Texture2D, selected: bool, scale_factor: float = 0.56) -> void:
-		if texture == null:
-			return
-		var pin_size := Vector2(64.0, 80.0) * scale_factor
-		var rect := Rect2(
-			Vector2(roundf(anchor.x - pin_size.x * 0.5), roundf(anchor.y - pin_size.y)),
-			pin_size
-		)
-		if selected:
-			draw_circle(Vector2(anchor.x, anchor.y - pin_size.y * 0.48), pin_size.x * 0.52, Color(0.0, 0.44, 0.72, 0.12))
-		draw_texture_rect(texture, rect, false)
-
-	func _tracking_marker_color(location: Dictionary) -> Color:
-		var communication_state := str(location.get("communication_state", "")).strip_edges().to_lower()
-		if communication_state == "ligado":
-			return Color("#16a673")
-		if communication_state == "desligado":
-			return Color("#dc3545")
-		if communication_state == "desatualizado":
-			return Color("#f2b233")
-		# Compatibilidade com linhas antigas ou telas que ainda nao passaram pela
-		# classificacao da Localizacao.
-		var status := str(location.get("monitoring_status", location.get("status", ""))).to_lower()
-		var ignition := str(location.get("ignition", "")).strip_edges().to_lower()
-		if ignition in ["1", "on", "ligado", "true"] or status.contains("ligado"):
-			return Color("#16a673")
-		if ignition in ["0", "off", "desligado", "false"] or status.contains("desligado"):
-			return Color("#dc3545")
-		if status.contains("desatual") or status.contains("antiga"):
-			return Color("#f2b233")
-		return Color("#8b98a6")
-
-	func _draw_tracking_legend() -> void:
-		var legend_size := Vector2(286, 86)
-		var legend_position := Vector2(14, maxf(12.0, size.y - legend_size.y - 34.0))
-		var legend_style := StyleBoxFlat.new()
-		legend_style.bg_color = Color(1, 1, 1, 0.94)
-		legend_style.border_color = Color("#dbe5ee")
-		legend_style.set_border_width_all(1)
-		legend_style.set_corner_radius_all(7)
-		draw_style_box(legend_style, Rect2(legend_position, legend_size))
-		var font := get_theme_default_font()
-		draw_string(font, legend_position + Vector2(12, 19), "Legenda", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("#23364a"))
-		for item in [["Ligado", Color("#16a673")], ["Desligado", Color("#dc3545")], ["Desatualizado", Color("#f2b233")]]:
-			var item_data: Array = item
-			var item_index := ["Ligado", "Desligado", "Desatualizado"].find(str(item_data[0]))
-			var x := legend_position.x + 12.0 + float(item_index) * 88.0
-			draw_circle(Vector2(x, legend_position.y + 40.0), 5.0, item_data[1])
-			draw_string(font, Vector2(x + 9.0, legend_position.y + 44.0), str(item_data[0]), HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color("#657487"))
-		draw_string(font, legend_position + Vector2(12, 67), "Bolha numerada: clique para alternar aparelhos", HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color("#657487"))
-
-	func _station_visual_groups() -> Array[Dictionary]:
-		var groups_by_key: Dictionary = {}
-		var cell_size := 52.0 if map_zoom <= 13 else (38.0 if map_zoom <= 15 else 28.0)
-		for station_index in range(stations.size()):
-			var station: Dictionary = stations[station_index]
-			var position := _map_position(float(station.get("lat", 0.0)), float(station.get("lng", 0.0)))
-			if position.x < 4.0 or position.y < 4.0 or position.x > size.x - 4.0 or position.y > size.y - 4.0:
-				continue
-			var key := "%d:%d" % [floori(position.x / cell_size), floori(position.y / cell_size)]
-			if not groups_by_key.has(key):
-				groups_by_key[key] = {
-					"indices": [],
-					"position": Vector2.ZERO,
-					"operator_counts": {},
-					"generation_counts": {},
-				}
-			var group: Dictionary = groups_by_key[key]
-			var indices: Array = group.get("indices", [])
-			indices.append(station_index)
-			group["indices"] = indices
-			group["position"] = (group.get("position", Vector2.ZERO) as Vector2) + position
-			var operator_name := str(station.get("operator", "OUTRAS"))
-			var operator_counts: Dictionary = group.get("operator_counts", {})
-			operator_counts[operator_name] = int(operator_counts.get(operator_name, 0)) + 1
-			group["operator_counts"] = operator_counts
-			var generation_name := str(station.get("generation", "4G"))
-			var generation_counts: Dictionary = group.get("generation_counts", {})
-			generation_counts[generation_name] = int(generation_counts.get(generation_name, 0)) + 1
-			group["generation_counts"] = generation_counts
-			groups_by_key[key] = group
-		var result: Array[Dictionary] = []
-		for group_value in groups_by_key.values():
-			var group: Dictionary = group_value
-			var count: int = maxi(1, (group.get("indices", []) as Array).size())
-			group["position"] = (group.get("position", Vector2.ZERO) as Vector2) / float(count)
-			result.append(group)
-		return result
-
-	func _draw_station_cluster(group: Dictionary) -> void:
-		var position: Vector2 = group.get("position", Vector2.ZERO)
-		var indices: Array = group.get("indices", [])
-		if position.x < 4.0 or position.y < 4.0 or position.x > size.x - 4.0 or position.y > size.y - 4.0:
-			return
-		var operator_counts: Dictionary = group.get("operator_counts", {})
-		var dominant_operator := "OUTRAS"
-		var dominant_count := 0
-		for operator_name in operator_counts.keys():
-			var amount := int(operator_counts[operator_name])
-			if amount > dominant_count:
-				dominant_operator = str(operator_name)
-				dominant_count = amount
-		var accent := _operator_color(dominant_operator)
-		var radius := clampf(12.0 + sqrt(float(indices.size())) * 1.4, 14.0, 24.0)
-		var selected := selected_station_index >= 0 and indices.has(selected_station_index)
-		draw_circle(position + Vector2(1.0, 2.0), radius + 2.0, Color(0.03, 0.12, 0.2, 0.20))
-		draw_circle(position, radius + 2.0, Color.WHITE)
-		draw_circle(position, radius, Color(accent.r, accent.g, accent.b, 0.94))
-		draw_arc(position, radius - 3.0, -PI * 0.5, PI * 0.5, 20, Color("#ff7a00"), 2.0, true)
-		if selected:
-			draw_arc(position, radius + 5.0, 0.0, TAU, 32, Color("#0070b8"), 2.0, true)
-		var font := get_theme_default_font()
-		var count_text := str(indices.size())
-		draw_string(font, position + Vector2(-14.0, 5.0), count_text, HORIZONTAL_ALIGNMENT_CENTER, 28.0, 12, Color.WHITE)
-
-	func _draw_map_legend() -> void:
-		var legend_size := Vector2(236, 88)
-		var legend_position := Vector2(14, maxf(12.0, size.y - legend_size.y - 34.0))
-		var legend_style := StyleBoxFlat.new()
-		legend_style.bg_color = Color(1, 1, 1, 0.94)
-		legend_style.border_color = Color("#dbe5ee")
-		legend_style.set_border_width_all(1)
-		legend_style.set_corner_radius_all(7)
-		draw_style_box(legend_style, Rect2(legend_position, legend_size))
-		var font := get_theme_default_font()
-		draw_string(font, legend_position + Vector2(12, 19), "Legenda", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("#23364a"))
-		draw_circle(legend_position + Vector2(17, 37), 5.0, Color("#ff7a00"))
-		draw_string(font, legend_position + Vector2(29, 41), "4G LTE", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color("#657487"))
-		draw_circle(legend_position + Vector2(91, 37), 5.0, Color("#0a2b4a"))
-		draw_string(font, legend_position + Vector2(103, 41), "2G GSM", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color("#657487"))
-		var operator_x := legend_position.x + 12.0
-		for operator_name in ["TIM", "CLARO", "VIVO", "OUTRAS"]:
-			draw_circle(Vector2(operator_x, legend_position.y + 57.0), 4.0, _operator_color(operator_name))
-			draw_string(font, Vector2(operator_x + 9.0, legend_position.y + 60.0), operator_name, HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color("#657487"))
-			operator_x += 57.0 if operator_name != "OUTRAS" else 62.0
-
-	func _draw_station_popup(station: Dictionary, position: Vector2) -> void:
-		var panel_size := Vector2(366, 196)
-		var panel_position := position + Vector2(18, -panel_size.y - 10)
-		if panel_position.x + panel_size.x > size.x - 8:
-			panel_position.x = size.x - panel_size.x - 8
-		if panel_position.y < 8:
-			panel_position.y = position.y + 18
-		var rect := Rect2(panel_position, panel_size)
-		draw_rect(rect, Color.WHITE, true)
-		draw_rect(rect, Color("#dfe7ef"), false, 1.0)
-		var font := get_theme_default_font()
-		var bands: Array = station.get("bands", [])
-		var lines := [
-			"ERB %s | %s" % [
-				str(station.get("id", station.get("code", "--"))),
-				str(station.get("operator", "--")),
-			],
-			"Tecnologia: %s" % str(station.get("generation", generation)),
-			"Cidade: %s | Bairro: %s" % [
-				str(station.get("city", "--")),
-				str(station.get("district", "--")),
-			],
-			"Endereco: %s" % str(station.get("address", "--")),
-			"Faixas: %s MHz" % (", ".join(bands) if not bands.is_empty() else "--"),
-			"Coordenadas: %.6f, %.6f" % [
-				float(station.get("lat", 0.0)),
-				float(station.get("lng", 0.0)),
-			],
-			"Fonte: Anatel | Base: %s" % dataset_updated_at,
-		]
-		for line_index in range(lines.size()):
-			var line_color := _operator_color(str(station.get("operator", ""))) if line_index == 0 else Color("#121c28")
-			draw_string(
-				font,
-				panel_position + Vector2(13, 24 + line_index * 21),
-				str(lines[line_index]),
-				HORIZONTAL_ALIGNMENT_LEFT,
-				panel_size.x - 26,
-				12,
-				line_color
-			)
-
-	func _map_position(latitude: float, longitude: float) -> Vector2:
-		if map_ready and map_viewport_size.x > 0.0 and map_viewport_size.y > 0.0:
-			var world_pixel := _lat_lng_to_world_pixel(latitude, longitude, map_zoom)
-			var raw := world_pixel - map_top_left
-			return Vector2(
-				size.x * raw.x / map_viewport_size.x,
-				size.y * raw.y / map_viewport_size.y
-			) + drag_offset
-		return Vector2(-10000.0, -10000.0)
-
-	func _operator_color(operator_name: String) -> Color:
-		match operator_name.to_upper():
-			"CLARO":
-				return Color("#df3434")
-			"TIM":
-				return Color("#2f83ff")
-			"VIVO":
-				return Color("#8b5ad9")
-		return Color("#7d8792")
-
-	func _lat_lng_to_world_pixel(lat: float, lng: float, zoom: int) -> Vector2:
-		var lat_rad := deg_to_rad(lat)
-		var n := pow(2.0, float(zoom))
-		var x_float := (lng + 180.0) / 360.0 * n
-		var y_float := (1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / PI) / 2.0 * n
-		return Vector2(x_float * 256.0, y_float * 256.0)
-
-	func _world_pixel_to_lat_lng(point: Vector2, zoom: int) -> Vector2:
-		var n := pow(2.0, float(zoom))
-		var longitude := point.x / 256.0 / n * 360.0 - 180.0
-		var mercator_y := PI * (1.0 - 2.0 * point.y / 256.0 / n)
-		var latitude := rad_to_deg(atan(sinh(mercator_y)))
-		return Vector2(latitude, longitude)
-
-	func _screen_to_world(point: Vector2) -> Vector2:
-		var safe_size := Vector2(maxf(size.x, 1.0), maxf(size.y, 1.0))
-		var local_point := point - drag_offset
-		return map_top_left + Vector2(
-			local_point.x * map_viewport_size.x / safe_size.x,
-			local_point.y * map_viewport_size.y / safe_size.y
-		)
-
-	func _request_pan_navigation() -> void:
-		if navigation_loading:
-			drag_offset = Vector2.ZERO
-			queue_redraw()
-			return
-		var safe_size := Vector2(maxf(size.x, 1.0), maxf(size.y, 1.0))
-		var world_delta := Vector2(
-			drag_offset.x * map_viewport_size.x / safe_size.x,
-			drag_offset.y * map_viewport_size.y / safe_size.y
-		)
-		var center_world := map_top_left + map_viewport_size * 0.5 - world_delta
-		var center_geo := _world_pixel_to_lat_lng(center_world, map_zoom)
-		navigation_loading = true
-		loading_stage = "Atualizando a area selecionada..."
-		navigation_requested.emit(center_geo.x, center_geo.y, map_zoom)
-		queue_redraw()
-
-	func _request_zoom(anchor: Vector2, zoom_delta: int) -> void:
-		if navigation_loading:
-			return
-		var next_zoom := clampi(map_zoom + zoom_delta, MIN_MAP_ZOOM, MAX_MAP_ZOOM)
-		if next_zoom == map_zoom:
-			return
-		var anchor_world := _screen_to_world(anchor)
-		var anchor_geo := _world_pixel_to_lat_lng(anchor_world, map_zoom)
-		var next_anchor_world := _lat_lng_to_world_pixel(anchor_geo.x, anchor_geo.y, next_zoom)
-		var safe_size := Vector2(maxf(size.x, 1.0), maxf(size.y, 1.0))
-		var anchor_ratio := Vector2(anchor.x / safe_size.x, anchor.y / safe_size.y)
-		var next_top_left := next_anchor_world - Vector2(
-			anchor_ratio.x * map_viewport_size.x,
-			anchor_ratio.y * map_viewport_size.y
-		)
-		var next_center := _world_pixel_to_lat_lng(
-			next_top_left + map_viewport_size * 0.5,
-			next_zoom
-		)
-		selected_cell_index = -1
-		navigation_loading = true
-		loading_stage = "Aproximando o mapa..."
-		navigation_requested.emit(next_center.x, next_center.y, next_zoom)
-		queue_redraw()
-
-	func _map_control_rect(index: int) -> Rect2:
-		return Rect2(
-			Vector2(16.0, 16.0 + float(index) * (MAP_CONTROL_SIZE + MAP_CONTROL_GAP)),
-			Vector2(MAP_CONTROL_SIZE, MAP_CONTROL_SIZE)
-		)
-
-	func _map_control_action(point: Vector2) -> String:
-		if _map_control_rect(0).has_point(point):
-			return "zoom_in"
-		if _map_control_rect(1).has_point(point):
-			return "zoom_out"
-		if _map_control_rect(2).has_point(point):
-			return "reset"
-		return ""
-
-	func _activate_map_control(action: String) -> void:
-		match action:
-			"zoom_in":
-				_request_zoom(size * 0.5, 1)
-			"zoom_out":
-				_request_zoom(size * 0.5, -1)
-			"reset":
-				if navigation_loading:
-					return
-				selected_cell_index = -1
-				navigation_loading = true
-				loading_stage = "Retornando para a regiao inicial..."
-				reset_requested.emit()
-				queue_redraw()
-
-	func _draw_map_controls() -> void:
-		var font := get_theme_default_font()
-		for index in range(3):
-			var rect := _map_control_rect(index)
-			draw_rect(rect, Color(1, 1, 1, 0.96), true)
-			draw_rect(rect, Color("#cbd7e2"), false, 1.0)
-			var center := rect.get_center()
-			if index == 0:
-				draw_line(center + Vector2(-7, 0), center + Vector2(7, 0), Color("#17344f"), 2.0, true)
-				draw_line(center + Vector2(0, -7), center + Vector2(0, 7), Color("#17344f"), 2.0, true)
-			elif index == 1:
-				draw_line(center + Vector2(-7, 0), center + Vector2(7, 0), Color("#17344f"), 2.0, true)
-			else:
-				draw_circle(center, 8.0, Color.TRANSPARENT, false, 2.0, true)
-				draw_circle(center, 2.5, Color("#17344f"))
-				draw_line(center + Vector2(0, -12), center + Vector2(0, -7), Color("#17344f"), 1.5, true)
-				draw_line(center + Vector2(0, 7), center + Vector2(0, 12), Color("#17344f"), 1.5, true)
-				draw_line(center + Vector2(-12, 0), center + Vector2(-7, 0), Color("#17344f"), 1.5, true)
-				draw_line(center + Vector2(7, 0), center + Vector2(12, 0), Color("#17344f"), 1.5, true)
-		draw_string(
-			font,
-			Vector2(17, _map_control_rect(2).end.y + 20),
-			"Z%d" % map_zoom,
-			HORIZONTAL_ALIGNMENT_CENTER,
-			MAP_CONTROL_SIZE,
-			11,
-			Color("#31465b")
-		)
-
-	func _draw_navigation_loading() -> void:
-		var panel_size := Vector2(226, 40)
-		var panel_position := Vector2((size.x - panel_size.x) * 0.5, 14)
-		draw_rect(Rect2(panel_position, panel_size), Color(1, 1, 1, 0.96), true)
-		draw_rect(Rect2(panel_position, panel_size), Color("#cbd9e6"), false, 1.0)
-		var spinner_center := panel_position + Vector2(22, 20)
-		draw_arc(spinner_center, 8.0, 0.0, TAU, 24, Color("#d5e1ec"), 2.5, true)
-		var start_angle := loading_phase * TAU - PI * 0.5
-		draw_arc(spinner_center, 8.0, start_angle, start_angle + PI * 0.8, 12, Color("#0877bd"), 2.5, true)
-		draw_string(
-			get_theme_default_font(),
-			panel_position + Vector2(39, 25),
-			loading_stage,
-			HORIZONTAL_ALIGNMENT_LEFT,
-			panel_size.x - 48,
-			11,
-			Color("#20374e")
-		)
-
-	func _draw_map_scale() -> void:
-		var center_world := _screen_to_world(size * 0.5)
-		var center_geo := _world_pixel_to_lat_lng(center_world, map_zoom)
-		var meters_per_pixel := (
-			156543.03392
-			* cos(deg_to_rad(center_geo.x))
-			/ pow(2.0, float(map_zoom))
-		)
-		var target_pixels := 110.0
-		var target_km := meters_per_pixel * target_pixels / 1000.0
-		var scale_km := 0.5
-		for candidate in [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0]:
-			if float(candidate) <= target_km:
-				scale_km = float(candidate)
-		var scale_pixels := scale_km * 1000.0 / maxf(meters_per_pixel, 0.01)
-		var origin := Vector2((size.x - scale_pixels) * 0.5, size.y - 22)
-		draw_line(origin, origin + Vector2(scale_pixels, 0), Color("#17344f"), 3.0, true)
-		draw_line(origin, origin + Vector2(0, -6), Color("#17344f"), 2.0, true)
-		draw_line(origin + Vector2(scale_pixels, 0), origin + Vector2(scale_pixels, -6), Color("#17344f"), 2.0, true)
-		draw_string(
-			get_theme_default_font(),
-			origin + Vector2(0, -8),
-			"%.1f km" % scale_km if scale_km < 1.0 else "%d km" % int(scale_km),
-			HORIZONTAL_ALIGNMENT_CENTER,
-			scale_pixels,
-			10,
-			Color("#17344f")
-		)
-
-
+const Smart4GMapCanvas := preload("res://src/features/big_map/big_map_canvas.gd")
 class RsLoadingOrbit:
 	extends Control
 
@@ -2049,6 +1016,7 @@ var sidebar_buttons: Dictionary = {}
 var sidebar_equipment_toggle: Button
 var sidebar_equipment_children: VBoxContainer
 var sidebar_equipment_expanded := true
+var sidebar_collapsed := false
 var current_section := "dashboard"
 var cloud_status_dot: CloudStatusDot
 var cloud_status_pulse: FirebaseTopbarPulse
@@ -2070,6 +1038,7 @@ var online_services_initialized := false
 var server_health_core: ServerHealthCore
 var server_health_state_label: Label
 var server_health_detail_label: Label
+var server_health_connection_label: Label
 var server_health_latency_label: Label
 var server_health_sync_label: Label
 var server_health_history_body: VBoxContainer
@@ -2216,10 +1185,8 @@ var vehicle_location_refreshing := false
 var vehicle_location_source := ""
 var vehicle_location_map_generation := 0
 var vehicle_location_query_generation := 0
-var big_map_mode := "erb"
-var big_map_mode_content: VBoxContainer
-var big_map_root: VBoxContainer
-var big_map_mode_buttons: Dictionary = {}
+var vehicle_location_integration: VehicleLocationIntegration
+var vehicle_location_operator_cache: Dictionary = {}
 var search_refresh_timer: Timer
 var selected_branch_id := ""
 var selected_branch_name := ""
@@ -2605,6 +1572,7 @@ var assistant_codex_auto_send_disabled_for_tests := false
 
 
 func _ready() -> void:
+	vehicle_location_integration = VehicleLocationIntegration.new()
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	var app_theme := Theme.new()
 	app_theme.default_font = UI_FONT
@@ -2670,6 +1638,7 @@ func _clear_screen() -> void:
 	sidebar_equipment_toggle = null
 	sidebar_equipment_children = null
 	sidebar_equipment_expanded = true
+	sidebar_collapsed = false
 	branch_card_entries.clear()
 	branch_summary_status_labels.clear()
 	branch_summary_dot_labels.clear()
@@ -2694,6 +1663,7 @@ func _clear_screen() -> void:
 	server_health_core = null
 	server_health_state_label = null
 	server_health_detail_label = null
+	server_health_connection_label = null
 	server_health_latency_label = null
 	server_health_sync_label = null
 	server_health_history_body = null
@@ -2830,6 +1800,8 @@ func _clear_screen() -> void:
 	vehicle_location_queue_count_label = null
 	vehicle_location_add_button = null
 	vehicle_location_query_queue.clear()
+	vehicle_location_integration = VehicleLocationIntegration.new()
+	vehicle_location_operator_cache.clear()
 	vehicle_location_summary_value_labels.clear()
 	vehicle_location_rows.clear()
 	vehicle_location_filtered_rows.clear()
@@ -2838,10 +1810,6 @@ func _clear_screen() -> void:
 	vehicle_location_source = ""
 	vehicle_location_map_generation += 1
 	vehicle_location_query_generation += 1
-	big_map_mode = "erb"
-	big_map_mode_content = null
-	big_map_root = null
-	big_map_mode_buttons.clear()
 	table_row_nodes.clear()
 	table_row_signatures.clear()
 	table_plate_drafts.clear()
@@ -4493,12 +3461,28 @@ func _build_sidebar() -> Control:
 	list.add_child(_make_sidebar_brand())
 
 	var divider := HSeparator.new()
-	divider.add_theme_constant_override("separation", 8)
+	divider.add_theme_constant_override("separation", 10)
 	divider.add_theme_color_override("separator_color", Color("#315775"))
 	list.add_child(divider)
+	var navigation_caption := Label.new()
+	navigation_caption.text = "NAVEGAÇÃO"
+	navigation_caption.add_theme_font_override("font", UI_FONT)
+	navigation_caption.add_theme_font_size_override("font_size", 11)
+	navigation_caption.add_theme_color_override("font_color", Color("#9cb8cf"))
+	var navigation_margin := MarginContainer.new()
+	navigation_margin.add_theme_constant_override("margin_left", 12)
+	navigation_margin.add_theme_constant_override("margin_top", 2)
+	navigation_margin.add_child(navigation_caption)
+	list.add_child(navigation_margin)
 
 	list.add_child(_make_sidebar_button("Inicio", "dashboard", "dashboard", _show_dashboard))
+	if _branch_supports_monitor_4g():
+		list.add_child(_make_sidebar_button("Mapa Grande", "localizacao", "monitor_4g", _show_smart_4g_monitor))
 	list.add_child(_make_sidebar_equipment_group())
+	var section_divider := HSeparator.new()
+	section_divider.add_theme_constant_override("separation", 8)
+	section_divider.add_theme_color_override("separator_color", Color("#315775"))
+	list.add_child(section_divider)
 	if _branch_supports_sms():
 		list.add_child(_make_sidebar_button("Painel SMS", "timeline", "sms_panel", _show_sms_panel))
 	list.add_child(_make_sidebar_button("Configurações", "configuracoes", "settings", _show_arya_config))
@@ -4508,6 +3492,15 @@ func _build_sidebar() -> Control:
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	list.add_child(spacer)
 
+	var base_caption := Label.new()
+	base_caption.text = "BASE ATUAL"
+	base_caption.add_theme_font_override("font", UI_FONT)
+	base_caption.add_theme_font_size_override("font_size", 11)
+	base_caption.add_theme_color_override("font_color", Color("#9cb8cf"))
+	var base_margin := MarginContainer.new()
+	base_margin.add_theme_constant_override("margin_left", 12)
+	base_margin.add_child(base_caption)
+	list.add_child(base_margin)
 	list.add_child(_make_sidebar_branch_card())
 	var exit_divider := HSeparator.new()
 	exit_divider.name = "SidebarExitDivider"
@@ -4564,7 +3557,7 @@ func _make_sidebar_equipment_group() -> Control:
 		_make_sidebar_button("Estoque", "cadastros", "inventory", _show_list, true)
 	)
 	sidebar_equipment_children.add_child(
-		_make_sidebar_button("Mapa Grande", "localizacao", "big_map", Callable(self, "_show_big_map").bind("erb"), true)
+		_make_sidebar_button("Localização", "localizacao", "tracking", _show_vehicle_location_monitor, true)
 	)
 	sidebar_equipment_children.add_child(
 		_make_sidebar_button("Cadastro em massa", "arquivo", "bulk", _show_bulk_registration, true)
@@ -4576,13 +3569,13 @@ func _make_sidebar_equipment_group() -> Control:
 
 func _make_sidebar_brand() -> Control:
 	var row := HBoxContainer.new()
-	row.custom_minimum_size = Vector2(0, 78)
+	row.custom_minimum_size = Vector2(0, 82)
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.add_theme_constant_override("separation", 12)
 
 	var logo := TextureRect.new()
 	logo.texture = LOGO_TEXTURE
-	logo.custom_minimum_size = Vector2(50, 50)
+	logo.custom_minimum_size = Vector2(56, 56)
 	logo.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
 	logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	row.add_child(logo)
@@ -4623,13 +3616,6 @@ func _make_sidebar_branch_card() -> Control:
 	var stack := VBoxContainer.new()
 	stack.add_theme_constant_override("separation", 1)
 	margin.add_child(stack)
-
-	var caption := Label.new()
-	caption.text = "BASE ATUAL"
-	caption.add_theme_font_override("font", UI_FONT)
-	caption.add_theme_font_size_override("font_size", 11)
-	caption.add_theme_color_override("font_color", Color("#b7cada"))
-	stack.add_child(caption)
 
 	sidebar_branch_name_label = Label.new()
 	sidebar_branch_name_label.text = "RS %s" % selected_branch_name.to_upper()
@@ -4779,7 +3765,7 @@ func _apply_sidebar_button_state(button: Button, active: bool) -> void:
 
 
 func _is_sidebar_equipment_section(section: String) -> bool:
-	return section in ["inventory", "vehicle_location", "monitor_4g", "big_map", "bulk"]
+	return section in ["inventory", "vehicle_location", "bulk"]
 
 
 func _toggle_sidebar_equipment_group() -> void:
@@ -4805,7 +3791,7 @@ func _set_page_context(section: String, title: String, subtitle: String = "") ->
 	if is_instance_valid(topbar_title_label):
 		topbar_title_label.text = title
 	if is_instance_valid(topbar_subtitle_label):
-		topbar_subtitle_label.text = subtitle
+		topbar_subtitle_label.text = "Início  ›  %s" % title
 	for section_key in sidebar_buttons:
 		var button: Button = sidebar_buttons[section_key]
 		if is_instance_valid(button):
@@ -5080,14 +4066,14 @@ func _show_maintenance_menu() -> void:
 
 func _build_topbar() -> Control:
 	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(0, AppDesignSystem.TOPBAR_HEIGHT)
+	panel.custom_minimum_size = Vector2(0, 92.0)
 	panel.add_theme_stylebox_override("panel", AppDesignSystem.surface(Color("#F7FAFD"), Color("#DCE7F2"), 1, 0, false))
 
 	var margin := MarginContainer.new()
-	margin.add_theme_constant_override("margin_left", 28)
+	margin.add_theme_constant_override("margin_left", 22)
 	margin.add_theme_constant_override("margin_right", 22)
-	margin.add_theme_constant_override("margin_top", 5)
-	margin.add_theme_constant_override("margin_bottom", 5)
+	margin.add_theme_constant_override("margin_top", 10)
+	margin.add_theme_constant_override("margin_bottom", 10)
 	panel.add_child(margin)
 
 	var row := HBoxContainer.new()
@@ -5096,8 +4082,24 @@ func _build_topbar() -> Control:
 	row.add_theme_constant_override("separation", 10)
 	margin.add_child(row)
 
+	var menu_button := Button.new()
+	menu_button.name = "SidebarMenuButton"
+	menu_button.text = "☰"
+	menu_button.tooltip_text = "Mostrar ou ocultar a navegação"
+	menu_button.custom_minimum_size = Vector2(42, 42)
+	menu_button.focus_mode = Control.FOCUS_NONE
+	menu_button.add_theme_font_override("font", UI_FONT)
+	menu_button.add_theme_font_size_override("font_size", 25)
+	menu_button.add_theme_color_override("font_color", AppDesignSystem.NAVY)
+	menu_button.add_theme_color_override("font_hover_color", AppDesignSystem.BLUE)
+	menu_button.add_theme_stylebox_override("normal", _style_box(Color.TRANSPARENT, Color.TRANSPARENT, 0, 8))
+	menu_button.add_theme_stylebox_override("hover", _style_box(Color("#eef6fd"), Color("#dceaf6"), 1, 8))
+	menu_button.add_theme_stylebox_override("pressed", _style_box(Color("#e3f1fb"), Color("#c4dff1"), 1, 8))
+	menu_button.pressed.connect(_toggle_sidebar_collapsed)
+	row.add_child(menu_button)
+
 	var left_slot := VBoxContainer.new()
-	left_slot.custom_minimum_size = Vector2(300, 0)
+	left_slot.custom_minimum_size = Vector2(320, 0)
 	left_slot.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	left_slot.alignment = BoxContainer.ALIGNMENT_BEGIN
 	left_slot.add_theme_constant_override("separation", 1)
@@ -5107,12 +4109,12 @@ func _build_topbar() -> Control:
 	topbar_title_label.text = "Dashboard inicial"
 	topbar_title_label.clip_text = true
 	topbar_title_label.add_theme_font_override("font", UI_FONT)
-	topbar_title_label.add_theme_font_size_override("font_size", 20)
+	topbar_title_label.add_theme_font_size_override("font_size", 22)
 	topbar_title_label.add_theme_color_override("font_color", AppDesignSystem.TEXT)
 	left_slot.add_child(topbar_title_label)
 
 	topbar_subtitle_label = Label.new()
-	topbar_subtitle_label.text = "Centro de operacoes inteligente"
+	topbar_subtitle_label.text = "Início  ›  Dashboard inicial"
 	topbar_subtitle_label.clip_text = true
 	topbar_subtitle_label.add_theme_font_override("font", UI_FONT)
 	topbar_subtitle_label.add_theme_font_size_override("font_size", 11)
@@ -5326,21 +4328,14 @@ func _run_remote_operation_job(job: Dictionary) -> void:
 		_remote_queue_stage(request, "Cadastro do equipamento", "API oficial consultando")
 		result = await _perform_equipment_registration(request)
 		if bool(result.get("ok", false)):
-			var registration_confirmation_pending := bool(result.get("confirmation_pending", false))
-			if registration_confirmation_pending and typeof(result.get("request", {})) == TYPE_DICTIONARY:
+			if bool(result.get("confirmation_pending", false)) and typeof(result.get("request", {})) == TYPE_DICTIONARY:
 				request.merge(result.get("request", {}) as Dictionary, true)
-			if registration_confirmation_pending:
-				_remote_queue_stage(request, "Confirmando cadastro e vinculo", "Aguardando leitura da API", "running", "API")
-				result = await _retry_pending_equipment_registration(request, result)
-				registration_confirmation_pending = bool(result.get("confirmation_pending", false))
-				if typeof(result.get("request", {})) == TYPE_DICTIONARY:
-					request.merge(result.get("request", {}) as Dictionary, true)
-			if registration_confirmation_pending:
+			if bool(result.get("confirmation_pending", false)):
 				var pending_message := str(result.get("message", "A API aceitou o cadastro, mas a confirmacao ainda esta pendente."))
-				_remote_queue_finish(queue_id, true, pending_message, "API", "pending")
+				_remote_queue_finish(queue_id, false, pending_message, "API", "pending")
 				_log_system_action_event(
-					"Confirmacao remota pendente",
-					"Cadastro aceito pela API; a fila retomara sem repetir o POST. Serie: %s | %s" % [serial, pending_message],
+					"Operacao remota pendente",
+					"Cadastro aceito pela API, aguardando confirmacao. Serie: %s | %s" % [serial, pending_message],
 					serial,
 					{
 						"status": "pending",
@@ -5360,11 +4355,6 @@ func _run_remote_operation_job(job: Dictionary) -> void:
 				result = {"ok": false, "message": str(finalized.get("message", "Falha ao atualizar o cadastro local."))}
 			else:
 				result["local"] = finalized
-				var firebase_result := await _ensure_firebase_registration_saved(serial, finalized.get("product", {}) as Dictionary)
-				if not bool(firebase_result.get("ok", false)):
-					result = {"ok": false, "message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao do cadastro.")), "firebase_pending": true}
-				else:
-					result["firebase"] = firebase_result
 	else:
 		_remote_queue_stage(request, "Consultando o aparelho", "API oficial")
 		result = await _perform_equipment_modification(request)
@@ -5389,7 +4379,7 @@ func _run_remote_operation_job(job: Dictionary) -> void:
 				_drain_remote_operation_queue()
 				return
 			_remote_queue_stage(request, "Confirmando modificacao", "API oficial" if not bool(result.get("web", false)) else "Fallback web", "running", "API" if not bool(result.get("web", false)) else "Fallback web")
-	if kind == "Modificacao" and store != null:
+	if store != null:
 		var finalized_modification := _finalize_local_equipment_modification(request)
 		if not bool(finalized_modification.get("ok", false)):
 			result = {"ok": false, "message": str(finalized_modification.get("message", "Falha ao atualizar o cadastro local."))}
@@ -5436,7 +4426,7 @@ func _run_remote_operation_job(job: Dictionary) -> void:
 		var message := str(result.get("message", "A operacao remota nao foi confirmada."))
 		_remote_queue_finish(queue_id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API")
 		_log_system_action("Falhou operacao remota", "%s | Serie: %s" % [message, serial], serial)
-	if bool(result.get("ok", false)) and not bool(result.get("confirmation_pending", false)) and has_method("_on_remote_operation_localized"):
+	if kind == "Modificacao" and bool(result.get("ok", false)) and has_method("_on_remote_operation_localized"):
 		call_deferred("_on_remote_operation_localized", kind, serial)
 	_drain_remote_operation_queue()
 
@@ -5567,7 +4557,7 @@ func _make_user_widget() -> Button:
 	var button := Button.new()
 	button.text = ""
 	button.tooltip_text = "Trocar base"
-	button.custom_minimum_size = Vector2(126, 58)
+	button.custom_minimum_size = Vector2(190, 58)
 	button.focus_mode = Control.FOCUS_NONE
 	button.pressed.connect(_show_branch_selector)
 	button.add_theme_stylebox_override("normal", AppDesignSystem.surface(Color("#FAFCFE"), Color("#DCE5EE"), 1, 7))
@@ -5613,7 +4603,7 @@ func _make_user_widget() -> Button:
 	stack.add_theme_constant_override("separation", 0)
 	row.add_child(stack)
 	var name_label := Label.new()
-	name_label.text = DEFAULT_AUTH_USER
+	name_label.text = str(_load_auth_config().get("user", DEFAULT_AUTH_USER))
 	name_label.add_theme_font_override("font", UI_FONT)
 	name_label.add_theme_font_size_override("font_size", 13)
 	name_label.add_theme_color_override("font_color", AppDesignSystem.NAVY)
@@ -5624,6 +4614,13 @@ func _make_user_widget() -> Button:
 	role_label.add_theme_font_size_override("font_size", 10)
 	role_label.add_theme_color_override("font_color", AppDesignSystem.MUTED)
 	stack.add_child(role_label)
+	var chevron := Label.new()
+	chevron.text = "⌄"
+	chevron.add_theme_font_override("font", UI_FONT)
+	chevron.add_theme_font_size_override("font_size", 18)
+	chevron.add_theme_color_override("font_color", AppDesignSystem.NAVY)
+	chevron.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(chevron)
 	return button
 
 
@@ -5688,8 +4685,7 @@ func _setup_st310_location_poll_timer() -> void:
 
 
 func _poll_st310_location_packet() -> void:
-	var vehicle_mode_active := current_section == "vehicle_location" or (current_section == "big_map" and big_map_mode == "vehicles")
-	if st310_location_polling or not vehicle_mode_active:
+	if st310_location_polling or current_section != "vehicle_location":
 		return
 	if vehicle_location_plate_input == null or not is_instance_valid(vehicle_location_plate_input):
 		return
@@ -5703,7 +4699,7 @@ func _poll_st310_location_packet() -> void:
 	# A localizacao e servida pela API de rastreamento e nao depende do
 	# Firebase. A releitura da base operacional acontece em seu proprio ciclo
 	# de sincronizacao, sem bloquear o mapa quando o estoque estiver offline.
-	if vehicle_mode_active and vehicle_location_plate_input != null and is_instance_valid(vehicle_location_plate_input):
+	if current_section == "vehicle_location" and vehicle_location_plate_input != null and is_instance_valid(vehicle_location_plate_input):
 		await _refresh_vehicle_location_view(vehicle_location_query_generation)
 	st310_location_polling = false
 
@@ -9638,10 +8634,13 @@ func _on_firebase_status_changed(status: Dictionary) -> void:
 	if server_health_state_label != null and is_instance_valid(server_health_state_label):
 		server_health_state_label.text = _firebase_state_text(state)
 		server_health_state_label.add_theme_color_override("font_color", color)
+	if server_health_connection_label != null and is_instance_valid(server_health_connection_label):
+		server_health_connection_label.text = "Servidor conectado" if online_data_available else _firebase_state_text(state)
+		server_health_connection_label.add_theme_color_override("font_color", GREEN if online_data_available else color)
 	if server_health_detail_label != null and is_instance_valid(server_health_detail_label):
-		server_health_detail_label.text = "%s\n%s" % [
+		server_health_detail_label.text = "%s\nFirebase / Realtime Database\n%s" % [
+			"Servidor conectado" if online_data_available else "Servidor não conectado",
 			_firebase_verification_text(status),
-			str(status.get("message", "Aguardando informacoes do servidor.")),
 		]
 	if server_health_latency_label != null and is_instance_valid(server_health_latency_label):
 		var latency := int(status.get("latency_ms", -1))
@@ -9735,7 +8734,7 @@ func _render_dashboard_firebase_history() -> void:
 func _firebase_state_text(state: String) -> String:
 	match state:
 		"synced", "online":
-			return "Servidor saudavel"
+			return "Servidor saudável"
 		"degraded":
 			return "Consulta parcial"
 		"syncing":
@@ -9745,13 +8744,13 @@ func _firebase_state_text(state: String) -> String:
 		"pending", "idle":
 			return "Aguardando servidor"
 		"offline":
-			return "Sem internet"
+			return "Servidor offline"
 		"conflict":
 			return "Recarregando servidor"
 		"auth_error":
 			return "Credencial recusada"
 		"error":
-			return "Atencao necessaria"
+			return "Atenção necessária"
 		_:
 			return "Servidor nao configurado"
 
@@ -9803,11 +8802,11 @@ func _firebase_state_color(state: String) -> Color:
 func _firebase_verification_text(status: Dictionary) -> String:
 	var read_ok := bool(status.get("read_ok", false))
 	var write_ok := bool(status.get("write_ok", false))
-	return "Consulta OK  |  Alteracao OK" if read_ok and write_ok else \
-		"Consulta %s  |  Alteracao %s" % [
-			"OK" if read_ok else "nao confirmada",
-			"OK" if write_ok else "nao confirmada",
-		]
+	return "Consulta OK  |  Alteração OK" if read_ok and write_ok else \
+		"Consulta %s  |  Alteração %s" % [
+			"OK" if read_ok else "não confirmada",
+			"OK" if write_ok else "não confirmada",
+	]
 
 
 func _firebase_topbar_metrics_text(status: Dictionary) -> String:
@@ -9856,7 +8855,7 @@ func _restore_backup(path: String) -> void:
 
 func _show_dashboard() -> void:
 	_set_page_context("dashboard", "Dashboard inicial", "Resumo da operacao e indicadores em tempo real")
-	_set_content_margins(42, 32, 42, 32)
+	_set_content_margins(22, 14, 22, 14)
 	_set_content(_build_dashboard_view())
 
 
@@ -9870,8 +8869,6 @@ func _restore_current_content_after_connection() -> void:
 			_show_vehicle_location_monitor()
 		"monitor_4g":
 			_show_smart_4g_monitor()
-		"big_map":
-			_show_big_map(big_map_mode)
 		"bulk":
 			_show_bulk_registration()
 		"logs":
@@ -9921,131 +8918,21 @@ func _show_smart_4g_monitor() -> void:
 	if not _branch_supports_monitor_4g():
 		_show_warning("Mapa de ERB's", "Este recurso esta disponivel somente para a base de Imperatriz.")
 		return
-	_show_big_map("erb")
+	_set_page_context("monitor_4g", "Mapa de ERB's", "Catálogo Anatel com busca inteligente por área e placa")
+	_set_content_margins(28, 18, 28, 20)
+	_set_content(_build_smart_4g_monitor_view())
+	if smart_4g_snapshot.is_empty() and not smart_4g_refreshing:
+		call_deferred("_refresh_smart_4g_monitor")
 
 
 func _show_vehicle_location_monitor() -> void:
-	_show_big_map("vehicles")
-
-
-func _show_big_map(preferred_mode: String = "") -> void:
-	if preferred_mode in ["erb", "vehicles"]:
-		big_map_mode = preferred_mode
-	_set_page_context("big_map", "Mapa Grande", "Torres ERB e localização de veículos em um único mapa")
-	_set_content_margins(28, 18, 28, 20)
-	_set_content(_build_big_map_view())
-	_switch_big_map_mode(big_map_mode)
-
-
-func _build_big_map_view() -> Control:
-	big_map_root = VBoxContainer.new()
-	big_map_root.name = "BigMapView"
-	big_map_root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	big_map_root.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	big_map_root.add_theme_constant_override("separation", 10)
-
-	var mode_panel := PanelContainer.new()
-	mode_panel.name = "BigMapModePanel"
-	mode_panel.add_theme_stylebox_override("panel", _style_box(Color("#ffffff"), BORDER, 1, 10))
-	var mode_margin := MarginContainer.new()
-	mode_margin.add_theme_constant_override("margin_left", 12)
-	mode_margin.add_theme_constant_override("margin_right", 12)
-	mode_margin.add_theme_constant_override("margin_top", 9)
-	mode_margin.add_theme_constant_override("margin_bottom", 9)
-	mode_panel.add_child(mode_margin)
-	var mode_row := HBoxContainer.new()
-	mode_row.add_theme_constant_override("separation", 8)
-	mode_margin.add_child(mode_row)
-	var mode_title := Label.new()
-	mode_title.text = "Mapa Grande"
-	mode_title.custom_minimum_size = Vector2(150, 42)
-	mode_title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	mode_title.add_theme_font_override("font", UI_FONT)
-	mode_title.add_theme_font_size_override("font_size", 17)
-	mode_title.add_theme_color_override("font_color", BLUE_DARK)
-	mode_row.add_child(mode_title)
-	var erb_button := _make_action_button("Torres ERB", BLUE, BLUE, Color.WHITE, Vector2(138, 42), Callable(self, "_switch_big_map_mode").bind("erb"))
-	erb_button.name = "BigMapErbButton"
-	var vehicle_button := _make_action_button("Veículos", GREEN, GREEN, Color.WHITE, Vector2(138, 42), Callable(self, "_switch_big_map_mode").bind("vehicles"))
-	vehicle_button.name = "BigMapVehiclesButton"
-	mode_row.add_child(erb_button)
-	mode_row.add_child(vehicle_button)
-	big_map_mode_buttons = {"erb": erb_button, "vehicles": vehicle_button}
-	var mode_hint := Label.new()
-	mode_hint.text = "Torres e agulhas compartilham o mesmo mapa"
-	mode_hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	mode_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	mode_hint.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	mode_hint.add_theme_font_override("font", UI_FONT)
-	mode_hint.add_theme_font_size_override("font_size", 12)
-	mode_hint.add_theme_color_override("font_color", MUTED)
-	mode_row.add_child(mode_hint)
-	big_map_root.add_child(mode_panel)
-
-	big_map_mode_content = VBoxContainer.new()
-	big_map_mode_content.name = "BigMapModeContent"
-	big_map_mode_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	big_map_mode_content.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	big_map_root.add_child(big_map_mode_content)
-	return big_map_root
-
-
-func _switch_big_map_mode(mode: String) -> void:
-	if mode not in ["erb", "vehicles"]:
-		mode = "erb"
-	big_map_mode = mode
-	if big_map_mode_buttons.size() > 0:
-		for key in big_map_mode_buttons:
-			var button := big_map_mode_buttons.get(key) as Button
-			if button == null or not is_instance_valid(button):
-				continue
-			var active := str(key) == mode
-			button.modulate = Color.WHITE if active else Color(0.78, 0.86, 0.92, 1.0)
-	if big_map_mode_content == null or not is_instance_valid(big_map_mode_content):
-		return
-	for child in big_map_mode_content.get_children():
-		big_map_mode_content.remove_child(child)
-		child.queue_free()
-	if mode == "erb":
-		if not _branch_supports_monitor_4g():
-			big_map_mode_content.add_child(_make_big_map_empty_state("Torres ERB indisponíveis", "Esta base não possui catálogo Anatel configurado."))
-			return
-		big_map_mode_content.add_child(_build_smart_4g_monitor_view())
-		if smart_4g_snapshot.is_empty() and not smart_4g_refreshing:
-			call_deferred("_refresh_smart_4g_monitor")
-		return
-	big_map_mode_content.add_child(_build_vehicle_location_view())
+	_set_page_context("vehicle_location", "Localização", "Rastreamento dos veículos e aparelhos em tempo real")
+	_set_content_margins(28, 20, 28, 18)
+	_set_content(_build_vehicle_location_view())
 	if vehicle_location_rows.is_empty() and not vehicle_location_refreshing:
 		call_deferred("_refresh_vehicle_location_view")
 	else:
 		call_deferred("_apply_vehicle_location_filters")
-
-
-func _make_big_map_empty_state(title_text: String, body_text: String) -> Control:
-	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(0, 220)
-	panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	panel.add_theme_stylebox_override("panel", _style_box(Color("#ffffff"), BORDER, 1, 10))
-	var center := CenterContainer.new()
-	panel.add_child(center)
-	var stack := VBoxContainer.new()
-	stack.add_theme_constant_override("separation", 8)
-	center.add_child(stack)
-	var title := Label.new()
-	title.text = title_text
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_override("font", UI_FONT)
-	title.add_theme_font_size_override("font_size", 18)
-	title.add_theme_color_override("font_color", BLUE_DARK)
-	stack.add_child(title)
-	var body := Label.new()
-	body.text = body_text
-	body.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	body.add_theme_font_override("font", UI_FONT)
-	body.add_theme_font_size_override("font_size", 13)
-	body.add_theme_color_override("font_color", MUTED)
-	stack.add_child(body)
-	return panel
 
 
 func _build_vehicle_location_view() -> Control:
@@ -10073,7 +8960,7 @@ func _build_vehicle_location_view() -> Control:
 	filter_stack.add_child(filter_row)
 
 	vehicle_location_plate_input = LineEdit.new()
-	vehicle_location_plate_input.placeholder_text = "Placa ou série"
+	vehicle_location_plate_input.placeholder_text = "Placa, equipamento ou cliente"
 	vehicle_location_plate_input.custom_minimum_size = Vector2(370, 48)
 	vehicle_location_plate_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vehicle_location_plate_input.add_theme_font_override("font", UI_FONT)
@@ -10191,7 +9078,7 @@ func _build_vehicle_location_view() -> Control:
 	vehicle_location_map_canvas.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vehicle_location_map_canvas.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vehicle_location_map_canvas.set_tracking_mode(true)
-	vehicle_location_map_canvas.set_station_visibility(false)
+	vehicle_location_map_canvas.set_station_visibility(true)
 	vehicle_location_map_canvas.tracking_selected.connect(_on_vehicle_location_map_selected)
 	vehicle_location_map_canvas.navigation_requested.connect(_on_vehicle_location_map_navigation)
 	vehicle_location_map_canvas.reset_requested.connect(_on_vehicle_location_map_reset)
@@ -10678,6 +9565,12 @@ func _fetch_vehicle_location_api_rows_smart(query: String = "") -> Dictionary:
 								normalized_by_plate = _grupo_rs_api_normalize_location(raw_by_plate as Dictionary)
 							normalized_by_plate = _vehicle_location_merge_identity(normalized_by_plate, identity_row)
 							return {"ok": true, "rows": [normalized_by_plate], "direct": true, "resolved_by_equipment": true}
+		# Placa e serie continuam usando os caminhos diretos acima. Como o
+		# endpoint de veiculos tambem devolve o cliente, este fallback permite a
+		# mesma cadeia para consultas por nome sem transformar o nome em placa.
+		var client_result := await _fetch_vehicle_location_api_rows_by_client(clean_query)
+		if bool(client_result.get("ok", false)) and not (client_result.get("rows", []) as Array).is_empty():
+			return client_result
 		return direct_result
 	# A listagem global pode conter milhares de registros e nao deve bloquear a
 	# tela aguardando todas as paginas. A busca direta acima localiza qualquer
@@ -10697,6 +9590,122 @@ func _fetch_vehicle_location_api_rows_smart(query: String = "") -> Dictionary:
 		if typeof(raw) == TYPE_DICTIONARY:
 			rows.append(_grupo_rs_api_normalize_location(raw as Dictionary))
 	return {"ok": true, "rows": rows, "direct": false, "partial": true}
+
+
+func _fetch_vehicle_location_api_rows_by_client(client_query: String) -> Dictionary:
+	var clean_query := client_query.strip_edges()
+	if clean_query == "":
+		return {"ok": false, "rows": [], "message": "Cliente vazio."}
+	var response := await _grupo_rs_api_get(
+		"/endpoints/veiculos.php?q=%s&skip=0&take=50" % clean_query.uri_encode(),
+		true,
+		true
+	)
+	if not bool(response.get("ok", false)):
+		return response
+	var payload: Variant = JSON.parse_string(str(response.get("body", "")))
+	if payload == null:
+		return {"ok": false, "rows": [], "message": "A API retornou JSON invalido ao consultar o cliente."}
+	var candidates: Array[Dictionary] = []
+	var query_key := _search_key(clean_query)
+	for raw in _grupo_rs_api_extract_rows(payload):
+		if typeof(raw) != TYPE_DICTIONARY:
+			continue
+		var vehicle := _grupo_rs_api_normalize_location(raw as Dictionary)
+		var client_text := _search_key(str(vehicle.get("client", "")))
+		if query_key != "" and client_text.contains(query_key):
+			candidates.append(vehicle)
+	if candidates.is_empty():
+		# Algumas versões do endpoint aceitam q apenas para placa/modelo. A
+		# varredura paginada é o fallback explícito para cliente e respeita os
+		# limites/guards já existentes da API oficial.
+		var all_vehicles := await _grupo_rs_api_fetch_vehicles(false)
+		if bool(all_vehicles.get("ok", false)):
+			for value in all_vehicles.get("rows", []) as Array:
+				if typeof(value) != TYPE_DICTIONARY:
+					continue
+				var vehicle := value as Dictionary
+				if query_key != "" and _search_key(str(vehicle.get("client", ""))).contains(query_key):
+					candidates.append(vehicle.duplicate(true))
+	if candidates.is_empty():
+		return {"ok": true, "rows": [], "not_found": true, "message": "Nenhum veiculo associado ao cliente informado."}
+	var locations: Array[Dictionary] = []
+	for vehicle in candidates:
+		var location_result := await _grupo_rs_api_find_location(
+			str(vehicle.get("serial", "")),
+			str(vehicle.get("plate", "")),
+			str(vehicle.get("vehicle_id", "")),
+			false
+		)
+		if not bool(location_result.get("ok", false)):
+			continue
+		var location: Variant = location_result.get("location", {})
+		if typeof(location) == TYPE_DICTIONARY:
+			locations.append(_vehicle_location_merge_identity(location as Dictionary, vehicle))
+	return {
+		"ok": true,
+		"rows": locations,
+		"direct": true,
+		"resolved_by_client": true,
+		"message": "Nenhuma localizacao disponivel para o cliente." if locations.is_empty() else "",
+	}
+
+
+func _resolve_vehicle_location_operator(location: Dictionary) -> Dictionary:
+	var direct := str(location.get("operator", "")).strip_edges()
+	if direct != "":
+		return {"operator": direct, "source": "API oficial"}
+	var serial := _digits_only(str(location.get("serial", "")))
+	var chip := _digits_only(str(location.get("chip", location.get("iccid", ""))))
+	var apn := str(location.get("apn", "")).strip_edges()
+	if chip == "" and serial != "":
+		var local_product := _local_product_for_serial(serial)
+		if not local_product.is_empty():
+			chip = _digits_only(_arya_product_local_iccid(local_product))
+			if apn == "":
+				apn = str(local_product.get("apn", "")).strip_edges()
+	var cache_key := "%s|%s|%s" % [serial, chip, apn.to_lower()]
+	var cached: Variant = vehicle_location_operator_cache.get(cache_key, {})
+	if typeof(cached) == TYPE_DICTIONARY:
+		var cached_data := cached as Dictionary
+		if int(Time.get_unix_time_from_system()) - int(cached_data.get("checked_at", 0)) < 86400:
+			return (cached_data.get("result", {}) as Dictionary).duplicate(true)
+	var result := {"operator": "", "source": "Operadora não determinada"}
+	if chip != "" and _apn_is_linksolutions(apn):
+		var link := await _query_linksolutions_sim_data(chip, false)
+		if bool(link.get("ok", false)):
+			var parsed_link: Dictionary = link.get("parsed", {})
+			result["operator"] = str(parsed_link.get("operator__name", parsed_link.get("operator", ""))).strip_edges()
+			if str(result["operator"]) != "":
+				result["source"] = "Linksolutions"
+	elif chip != "" and _apn_is_hinova(apn):
+		var arya := await _lookup_arya_inventory_data(chip)
+		if bool(arya.get("ok", false)):
+			var parsed_arya: Dictionary = arya.get("parsed", {})
+			result["operator"] = str(parsed_arya.get("operator", parsed_arya.get("operator__name", ""))).strip_edges()
+			if str(result["operator"]) != "":
+				result["source"] = "Arya"
+	if chip != "" and str(result["operator"]).strip_edges() == "":
+		# Se a API de localização não informou APN, ainda tentamos as duas
+		# fontes autenticadas pelo ICCID, sem escolher uma operadora por prefixo.
+		var arya_fallback := await _lookup_arya_inventory_data(chip)
+		if bool(arya_fallback.get("ok", false)):
+			var parsed_arya_fallback: Dictionary = arya_fallback.get("parsed", {})
+			result["operator"] = str(parsed_arya_fallback.get("operator", parsed_arya_fallback.get("operator__name", ""))).strip_edges()
+			if str(result["operator"]) != "":
+				result["source"] = "Arya"
+		if str(result["operator"]).strip_edges() == "":
+			var link_fallback := await _query_linksolutions_sim_data(chip, false)
+			if bool(link_fallback.get("ok", false)):
+				var parsed_link_fallback: Dictionary = link_fallback.get("parsed", {})
+				result["operator"] = str(parsed_link_fallback.get("operator__name", parsed_link_fallback.get("operator", ""))).strip_edges()
+				if str(result["operator"]) != "":
+					result["source"] = "Linksolutions"
+	vehicle_location_operator_cache[cache_key] = {
+		"checked_at": Time.get_unix_time_from_system(),
+		"result": result.duplicate(true),
+	}
+	return result
 
 
 func _vehicle_location_row_key(location: Dictionary) -> String:
@@ -10750,6 +9759,17 @@ func _refresh_vehicle_location_view(expected_generation: int = -1) -> void:
 				continue
 			if row_key != "":
 				seen_rows[row_key] = true
+			var operator_info := await _resolve_vehicle_location_operator(normalized_row)
+			if expected_generation >= 0 and expected_generation != vehicle_location_query_generation:
+				vehicle_location_refreshing = false
+				call_deferred("_refresh_vehicle_location_view", vehicle_location_query_generation)
+				return
+			var resolved_operator := str(operator_info.get("operator", "")).strip_edges()
+			if resolved_operator != "":
+				normalized_row["tracker_operator"] = resolved_operator
+				normalized_row["tracker_operator_source"] = str(operator_info.get("source", ""))
+				if str(normalized_row.get("operator", "")).strip_edges() == "":
+					normalized_row["operator"] = resolved_operator
 			normalized.append(normalized_row)
 	var source := "API oficial"
 
@@ -10878,24 +9898,47 @@ func _apply_vehicle_location_filters() -> void:
 		empty.add_theme_font_size_override("font_size", 14)
 		empty.add_theme_color_override("font_color", MUTED)
 		vehicle_location_list_body.add_child(empty)
+	if vehicle_location_filtered_rows.is_empty():
+		vehicle_location_selected.clear()
+	if vehicle_location_selected.is_empty():
+		vehicle_location_selected = vehicle_location_integration.select_vehicle(vehicle_location_filtered_rows)
 	if vehicle_location_selected.is_empty():
 		_render_vehicle_location_details({})
 	else:
 		var selected_key := _vehicle_location_row_key(vehicle_location_selected)
+		var selected_found := false
 		for location in vehicle_location_filtered_rows:
 			if selected_key != "" and _vehicle_location_row_key(location) == selected_key:
 				vehicle_location_selected = location.duplicate(true)
+				selected_found = true
 				break
+		if not selected_found:
+			vehicle_location_selected = vehicle_location_integration.select_vehicle(vehicle_location_filtered_rows)
 		_render_vehicle_location_details(vehicle_location_selected)
 	if vehicle_location_map_canvas != null and is_instance_valid(vehicle_location_map_canvas):
+		var map_rows := _vehicle_location_rows_for_map()
 		vehicle_location_map_canvas.set_tracking_mode(true)
-		vehicle_location_map_canvas.set_station_visibility(false)
-		vehicle_location_map_canvas.set_tracking_locations(vehicle_location_filtered_rows)
+		vehicle_location_map_canvas.set_station_visibility(true)
+		vehicle_location_map_canvas.set_tracking_locations(map_rows)
 		vehicle_location_map_generation += 1
 		# Em cada atualizacao automatica mantemos o centro e o zoom atuais. O
 		# enquadramento inicial continua sendo calculado somente quando ainda nao
 		# existe um mapa; o botao "Centralizar no mapa" continua podendo muda-lo.
-		call_deferred("_reload_vehicle_location_map", vehicle_location_map_generation, vehicle_location_filtered_rows.duplicate(true), current_map_view)
+		call_deferred("_reload_vehicle_location_map", vehicle_location_map_generation, map_rows, current_map_view)
+
+
+func _vehicle_location_rows_for_map() -> Array[Dictionary]:
+	# A lista pode conter mais de uma consulta, mas o mapa integrado representa
+	# exclusivamente o veículo selecionado. Isso evita transformar resultados
+	# anteriores ou ERBs em marcadores de veículos.
+	if vehicle_location_selected.is_empty():
+		var first := vehicle_location_integration.select_vehicle(vehicle_location_filtered_rows)
+		return [first] if not first.is_empty() else []
+	var selected_key := _vehicle_location_row_key(vehicle_location_selected)
+	for location in vehicle_location_filtered_rows:
+		if selected_key != "" and _vehicle_location_row_key(location) == selected_key:
+			return [location.duplicate(true)]
+	return []
 
 
 func _update_vehicle_location_summary(counts: Dictionary) -> void:
@@ -10970,6 +10013,13 @@ func _on_vehicle_location_map_selected(location: Dictionary) -> void:
 	_render_vehicle_location_details(vehicle_location_selected)
 	if vehicle_location_map_canvas != null and is_instance_valid(vehicle_location_map_canvas):
 		vehicle_location_map_canvas.select_tracking_by_key(str(location.get("serial", location.get("plate", ""))))
+
+
+func _on_vehicle_location_station_selected(station: Dictionary) -> void:
+	if station.is_empty() or vehicle_location_selected.is_empty():
+		return
+	vehicle_location_selected["selected_tower"] = station.duplicate(true)
+	_render_vehicle_location_details(vehicle_location_selected)
 
 
 func _close_vehicle_location_details() -> void:
@@ -11108,19 +10158,43 @@ func _reload_vehicle_location_map(generation: int, rows: Array, view_override: D
 		if not is_zero_approx(float(str(location.get("lat", "0")))) or not is_zero_approx(float(str(location.get("lng", "0")))):
 			valid_rows.append(location)
 	if valid_rows.is_empty():
-		vehicle_location_map_canvas.set_map_error("Nenhuma coordenada valida no recorte.")
-		vehicle_location_map_canvas.set_tracking_locations(rows as Array[Dictionary])
+		# Uma resposta sem posição não apaga o mapa nem as ERBs já carregadas.
+		# O estado da API é mostrado na lista/detalhes e nenhum marcador é criado.
+		vehicle_location_map_canvas.set_station_visibility(true)
+		vehicle_location_map_canvas.set_tracking_locations([])
 		return
 	var view := view_override.duplicate(true)
 	if view.is_empty():
 		view = _vehicle_location_map_view(valid_rows)
-	await _load_smart_4g_map_tiles(vehicle_location_map_canvas, [], "all", view)
+	var selected := vehicle_location_integration.select_vehicle(valid_rows)
+	var typed_devices: Array[Dictionary] = []
+	if not selected.is_empty():
+		typed_devices.append(vehicle_location_integration.map_device(selected))
+	await _load_smart_4g_map_tiles(vehicle_location_map_canvas, typed_devices, "all", view)
 	if generation != vehicle_location_map_generation or vehicle_location_map_canvas == null or not is_instance_valid(vehicle_location_map_canvas):
 		return
-	vehicle_location_map_canvas.set_coverage_profile({"stations": []})
-	vehicle_location_map_canvas.set_station_visibility(false)
+	var operator_info := {
+		"operator": str(selected.get("tracker_operator", selected.get("operator", ""))),
+		"source": str(selected.get("tracker_operator_source", "")),
+	}
+	var map_state := vehicle_location_integration.compose_map_state(
+		selected,
+		vehicle_location_map_canvas.stations,
+		operator_info
+	)
+	var integrated_vehicle: Dictionary = map_state.get("vehicle", selected)
+	vehicle_location_selected = integrated_vehicle.duplicate(true)
+	var selected_key := _vehicle_location_row_key(selected)
+	for index in range(vehicle_location_rows.size()):
+		if selected_key != "" and _vehicle_location_row_key(vehicle_location_rows[index]) == selected_key:
+			vehicle_location_rows[index] = integrated_vehicle.duplicate(true)
+	for index in range(vehicle_location_filtered_rows.size()):
+		if selected_key != "" and _vehicle_location_row_key(vehicle_location_filtered_rows[index]) == selected_key:
+			vehicle_location_filtered_rows[index] = integrated_vehicle.duplicate(true)
+	vehicle_location_map_canvas.set_station_visibility(true)
 	vehicle_location_map_canvas.set_tracking_mode(true)
-	vehicle_location_map_canvas.set_tracking_locations(rows as Array[Dictionary])
+	vehicle_location_map_canvas.set_tracking_locations([integrated_vehicle])
+	_render_vehicle_location_details(integrated_vehicle)
 
 
 func _vehicle_location_map_view(rows: Array[Dictionary]) -> Dictionary:
@@ -11144,14 +10218,35 @@ func _vehicle_location_map_view(rows: Array[Dictionary]) -> Dictionary:
 	return {"center": {"lat": center.x, "lng": center.y}, "zoom": zoom, "interactive": true}
 
 
+func _ensure_vehicle_location_map_ready() -> void:
+	if vehicle_location_map_canvas == null or not is_instance_valid(vehicle_location_map_canvas):
+		return
+	if vehicle_location_map_canvas.map_ready:
+		return
+	var view := {
+		"center": {"lat": BigMapConfig.DEFAULT_LATITUDE, "lng": BigMapConfig.DEFAULT_LONGITUDE},
+		"zoom": BigMapConfig.DEFAULT_ZOOM,
+		"interactive": false,
+	}
+	# O mapa de localização não herda uma área pesquisada no Monitor 4G.
+	smart_4g_anatel_profile = {}
+	await _load_smart_4g_map_tiles(vehicle_location_map_canvas, [], "all", view)
+	if vehicle_location_map_canvas == null or not is_instance_valid(vehicle_location_map_canvas):
+		return
+	vehicle_location_map_canvas.set_station_visibility(true)
+	vehicle_location_map_canvas.set_tracking_mode(true)
+	vehicle_location_map_canvas.set_tracking_locations([])
+
+
 func _on_vehicle_location_map_navigation(latitude: float, longitude: float, zoom: int) -> void:
 	vehicle_location_map_generation += 1
-	_reload_vehicle_location_map(vehicle_location_map_generation, vehicle_location_filtered_rows.duplicate(true), {"center": {"lat": latitude, "lng": longitude}, "zoom": zoom, "interactive": true})
+	_reload_vehicle_location_map(vehicle_location_map_generation, _vehicle_location_rows_for_map(), {"center": {"lat": latitude, "lng": longitude}, "zoom": zoom, "interactive": true})
 
 
 func _on_vehicle_location_map_reset() -> void:
 	vehicle_location_map_generation += 1
-	_reload_vehicle_location_map(vehicle_location_map_generation, vehicle_location_filtered_rows.duplicate(true), _vehicle_location_map_view(vehicle_location_filtered_rows))
+	var map_rows := _vehicle_location_rows_for_map()
+	_reload_vehicle_location_map(vehicle_location_map_generation, map_rows, _vehicle_location_map_view(map_rows))
 
 
 func _show_link_relatory() -> void:
@@ -11844,6 +10939,29 @@ func _play_startup_animation() -> void:
 func _set_sidebar_width(width: float) -> void:
 	if is_instance_valid(sidebar_panel):
 		sidebar_panel.custom_minimum_size = Vector2(width, 0)
+
+
+func _toggle_sidebar_collapsed() -> void:
+	if not is_instance_valid(sidebar_panel):
+		return
+	sidebar_collapsed = not sidebar_collapsed
+	var target_width := 74.0 if sidebar_collapsed else AppDesignSystem.SIDEBAR_WIDTH
+	var tween := create_tween()
+	tween.tween_method(_set_sidebar_width, sidebar_panel.custom_minimum_size.x, target_width, 0.2).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	for section_key in sidebar_buttons:
+		var button: Button = sidebar_buttons[section_key]
+		if not is_instance_valid(button):
+			continue
+		var label := button.find_child("SidebarLabel", true, false) as Label
+		if label != null:
+			label.visible = not sidebar_collapsed
+		var chevron := button.find_child("SidebarChevron", true, false) as Label
+		if chevron != null:
+			chevron.visible = not sidebar_collapsed
+	if is_instance_valid(sidebar_branch_name_label):
+		sidebar_branch_name_label.visible = not sidebar_collapsed
+	if is_instance_valid(sidebar_branch_status_label):
+		sidebar_branch_status_label.visible = not sidebar_collapsed
 
 
 func _animate_content_in(control: Control) -> void:
@@ -12812,7 +11930,6 @@ func _make_smart_4g_compact_map_panel(devices: Array[Dictionary]) -> Control:
 	smart_4g_map_canvas.set_city_label(_smart_4g_map_region_label(smart_4g_map_region_filter))
 	smart_4g_map_canvas.set_devices(mapped_devices)
 	smart_4g_map_canvas.set_coverage_profile(smart_4g_anatel_profile)
-	smart_4g_map_canvas.set_searched_location(_smart_4g_searched_location())
 	smart_4g_map_canvas.station_selected.connect(_show_smart_4g_station_details)
 	smart_4g_map_canvas.navigation_requested.connect(func(latitude: float, longitude: float, zoom: int):
 		call_deferred(
@@ -13004,15 +12121,6 @@ func _make_smart_4g_station_details_panel() -> PanelContainer:
 	actions.add_child(open_button)
 	stack.add_child(actions)
 	return panel
-
-
-func _smart_4g_searched_location() -> Dictionary:
-	# No Mapa Grande, a busca por placa compartilha o mapa das ERBs:
-	# as torres continuam visiveis e a agulha marca a coordenada retornada.
-	if smart_4g_location_search_mode != "plate":
-		return {}
-	var value: Variant = smart_4g_area_geocode.get("vehicle_location", {})
-	return (value as Dictionary).duplicate(true) if typeof(value) == TYPE_DICTIONARY else {}
 
 
 func _show_smart_4g_station_details(station: Dictionary) -> void:
@@ -13497,7 +12605,6 @@ func _apply_smart_4g_snapshot_to_view(reload_map_tiles: bool = false) -> void:
 		smart_4g_map_canvas.set_city_label(_smart_4g_map_region_label(smart_4g_map_region_filter))
 		smart_4g_map_canvas.set_devices([])
 		smart_4g_map_canvas.set_coverage_profile(smart_4g_anatel_profile)
-		smart_4g_map_canvas.set_searched_location(_smart_4g_searched_location())
 		var restored_station: Dictionary = {}
 		if smart_4g_selected_station_id != "":
 			for station_value in smart_4g_anatel_profile.get("stations", []) as Array:
@@ -14059,7 +13166,7 @@ func _load_smart_4g_map_tiles(
 			continue
 		for tile_x in range(first_tile.x, last_tile.x + 1):
 			var wrapped_x := posmod(tile_x, max_tile)
-			var cache_key := "%d/%d/%d" % [zoom, wrapped_x, tile_y]
+			var cache_key := BigMapTileProvider.cache_key(zoom, wrapped_x, tile_y)
 			var entry := {"key": cache_key, "x": tile_x, "y": tile_y}
 			var cached_bytes: Variant = smart_4g_tile_cache.get(cache_key, PackedByteArray())
 			if cached_bytes is PackedByteArray and not (cached_bytes as PackedByteArray).is_empty():
@@ -14183,13 +13290,13 @@ func _smart_4g_map_tile_worker(
 
 
 func _smart_4g_osm_tile_bytes(zoom: int, tile_x: int, tile_y: int) -> Dictionary:
-	var cache_key := "%d/%d/%d" % [zoom, tile_x, tile_y]
+	var cache_key := BigMapTileProvider.cache_key(zoom, tile_x, tile_y)
 	if smart_4g_tile_cache.has(cache_key):
 		return {
 			"ok": true,
 			"bytes": smart_4g_tile_cache.get(cache_key, PackedByteArray()),
 		}
-	var response := await _http_get_bytes(OSM_TILE_URL % [zoom, tile_x, tile_y])
+	var response := await _http_get_bytes(BigMapTileProvider.tile_url(zoom, tile_x, tile_y))
 	if not bool(response.get("ok", false)):
 		return response
 	smart_4g_tile_cache[cache_key] = response.get("bytes", PackedByteArray())
@@ -14201,13 +13308,7 @@ func _smart_4g_osm_tile_bytes(zoom: int, tile_x: int, tile_y: int) -> Dictionary
 
 
 func _smart_4g_osm_tile_texture(bytes: PackedByteArray) -> Texture2D:
-	if bytes.is_empty():
-		return null
-	var tile_image := Image.new()
-	if tile_image.load_png_from_buffer(bytes) != OK:
-		return null
-	tile_image.convert(Image.FORMAT_RGBA8)
-	return ImageTexture.create_from_image(tile_image)
+	return BigMapTileProvider.texture_from_png(bytes)
 
 
 func _build_smart_4g_map_profile(
@@ -14315,55 +13416,19 @@ func _smart_4g_map_zoom_for_devices(devices: Array[Dictionary], viewport_size: V
 
 
 func _smart_4g_map_region_definition(region_id: String) -> Dictionary:
-	for value in SMART_4G_MAP_REGION_CATALOG:
-		var definition := value as Dictionary
-		if str(definition.get("id", "")) == region_id:
-			return definition
-	return {}
+	return BigMapRegionService.definition(region_id)
 
 
 func _smart_4g_map_region_id_for_device(device: Dictionary) -> String:
-	if not bool(device.get("location_available", false)):
-		return "without_location"
-	var latitude := float(device.get("latitude", 0.0))
-	var longitude := float(device.get("longitude", 0.0))
-	var nearest_id := ""
-	var nearest_distance := INF
-	var nearest_radius := 0.0
-	for value in SMART_4G_MAP_REGION_CATALOG:
-		var definition := value as Dictionary
-		var distance := _smart_4g_distance_km(
-			latitude,
-			longitude,
-			float(definition.get("lat", 0.0)),
-			float(definition.get("lng", 0.0))
-		)
-		if distance < nearest_distance:
-			nearest_distance = distance
-			nearest_id = str(definition.get("id", ""))
-			nearest_radius = float(definition.get("radius_km", 0.0))
-	if nearest_id != "" and nearest_distance <= nearest_radius:
-		return nearest_id
-	return "other"
+	return BigMapRegionService.region_id_for_device(device)
 
 
 func _smart_4g_distance_km(lat_a: float, lng_a: float, lat_b: float, lng_b: float) -> float:
-	var earth_radius_km := 6371.0
-	var lat_delta := deg_to_rad(lat_b - lat_a)
-	var lng_delta := deg_to_rad(lng_b - lng_a)
-	var sin_lat := sin(lat_delta * 0.5)
-	var sin_lng := sin(lng_delta * 0.5)
-	var haversine := sin_lat * sin_lat \
-		+ cos(deg_to_rad(lat_a)) * cos(deg_to_rad(lat_b)) * sin_lng * sin_lng
-	return earth_radius_km * 2.0 * atan2(sqrt(haversine), sqrt(maxf(1.0 - haversine, 0.0)))
+	return BigMapProjection.distance_km(lat_a, lng_a, lat_b, lng_b)
 
 
 func _smart_4g_map_region_counts(devices: Array[Dictionary]) -> Dictionary:
-	var counts := {}
-	for device in devices:
-		var region_id := _smart_4g_map_region_id_for_device(device)
-		counts[region_id] = int(counts.get(region_id, 0)) + 1
-	return counts
+	return BigMapRegionService.counts_for_devices(devices)
 
 
 func _ensure_smart_4g_map_region_filter(devices: Array[Dictionary]) -> void:
@@ -15277,22 +14342,28 @@ func _build_dashboard_view() -> Control:
 	var diagnostics: Array = stock_module.call("get_diagnostics", store) if stock_module != null else store.get_diagnostics()
 	var trends := _capture_dashboard_trends(stats)
 
+	var scroll := ScrollContainer.new()
+	scroll.name = "DashboardScroll"
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	var root := VBoxContainer.new()
-	root.name = "DashboardOperationsView"
+	root.name = "DashboardCompactView"
 	root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	root.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	root.add_theme_constant_override("separation", 12)
+	root.custom_minimum_size = Vector2(0, 730)
+	root.add_theme_constant_override("separation", 14)
+	scroll.add_child(root)
 
 	var welcome := PanelContainer.new()
-	welcome.custom_minimum_size = Vector2(0, 92)
-	welcome.add_theme_stylebox_override("panel", AppDesignSystem.surface(Color("#FBFDFE"), Color("#DCE7F2"), 1, 10))
+	welcome.custom_minimum_size = Vector2(0, 82)
+	welcome.add_theme_stylebox_override("panel", AppDesignSystem.surface(Color("#FBFDFE"), Color("#E0E8F0"), 1, 7))
 	root.add_child(welcome)
 
 	var welcome_margin := MarginContainer.new()
-	welcome_margin.add_theme_constant_override("margin_left", 22)
-	welcome_margin.add_theme_constant_override("margin_right", 20)
-	welcome_margin.add_theme_constant_override("margin_top", 14)
-	welcome_margin.add_theme_constant_override("margin_bottom", 14)
+	welcome_margin.add_theme_constant_override("margin_left", 18)
+	welcome_margin.add_theme_constant_override("margin_right", 18)
+	welcome_margin.add_theme_constant_override("margin_top", 12)
+	welcome_margin.add_theme_constant_override("margin_bottom", 12)
 	welcome.add_child(welcome_margin)
 
 	var welcome_row := HBoxContainer.new()
@@ -15302,7 +14373,7 @@ func _build_dashboard_view() -> Control:
 	welcome_margin.add_child(welcome_row)
 
 	var welcome_icon_panel := PanelContainer.new()
-	welcome_icon_panel.custom_minimum_size = Vector2(56, 56)
+	welcome_icon_panel.custom_minimum_size = Vector2(52, 52)
 	welcome_icon_panel.add_theme_stylebox_override(
 		"panel",
 		AppDesignSystem.surface(Color("#edf5ff"), Color("#d8e9fb"), 1, 26)
@@ -15310,7 +14381,7 @@ func _build_dashboard_view() -> Control:
 	var welcome_icon_center := CenterContainer.new()
 	welcome_icon_panel.add_child(welcome_icon_center)
 	var welcome_icon := _make_sidebar_icon("assistente", BLUE_DARK)
-	welcome_icon.custom_minimum_size = Vector2(30, 30)
+	welcome_icon.custom_minimum_size = Vector2(28, 28)
 	welcome_icon_center.add_child(welcome_icon)
 	welcome_row.add_child(welcome_icon_panel)
 
@@ -15319,9 +14390,9 @@ func _build_dashboard_view() -> Control:
 	welcome_stack.add_theme_constant_override("separation", 1)
 	welcome_row.add_child(welcome_stack)
 	var greeting := Label.new()
-	greeting.text = "%s, %s!" % [_dashboard_day_greeting(), DEFAULT_AUTH_USER]
+	greeting.text = "%s, %s!" % [_dashboard_day_greeting(), str(_load_auth_config().get("user", DEFAULT_AUTH_USER))]
 	greeting.add_theme_font_override("font", UI_FONT)
-	greeting.add_theme_font_size_override("font_size", 24)
+	greeting.add_theme_font_size_override("font_size", 20)
 	greeting.add_theme_color_override("font_color", AppDesignSystem.TEXT)
 	welcome_stack.add_child(greeting)
 	var welcome_hint := Label.new()
@@ -15333,31 +14404,36 @@ func _build_dashboard_view() -> Control:
 	var welcome_actions := HBoxContainer.new()
 	welcome_actions.alignment = BoxContainer.ALIGNMENT_END
 	welcome_actions.add_theme_constant_override("separation", 8)
-	var verify_connection_button := _make_action_button("Verificar conexao", Color.WHITE, Color("#d6e3ef"), AppDesignSystem.NAVY, Vector2(178, 44), _refresh_dashboard_data)
-	verify_connection_button.add_theme_stylebox_override("normal", _style_box(Color.WHITE, Color("#d6e3ef"), 1, 8))
-	verify_connection_button.add_theme_stylebox_override("hover", _style_box(Color("#f3f9fe"), BLUE, 1, 8))
-	welcome_actions.add_child(verify_connection_button)
-	welcome_actions.add_child(_make_action_button("Atualizar dados", AppDesignSystem.BLUE, AppDesignSystem.BLUE, Color.WHITE, Vector2(166, 44), _refresh_dashboard_data))
+	var verify_button := _make_action_button("Verificar conexão", AppDesignSystem.BLUE_SOFT, Color("#C8DFF3"), AppDesignSystem.NAVY, Vector2(178, 42), _refresh_dashboard_data)
+	verify_button.icon = load(ICON_DIR + "sem_internet.svg")
+	verify_button.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	welcome_actions.add_child(verify_button)
+	var refresh_button := _make_action_button("Atualizar dados", AppDesignSystem.BLUE, AppDesignSystem.BLUE, Color.WHITE, Vector2(166, 42), _refresh_dashboard_data)
+	refresh_button.icon = load(ICON_DIR + "atualizar.svg")
+	refresh_button.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	welcome_actions.add_child(refresh_button)
 	welcome_row.add_child(welcome_actions)
 
-	var grid := GridContainer.new()
-	grid.columns = 3
-	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	grid.add_theme_constant_override("h_separation", 12)
-	grid.add_theme_constant_override("v_separation", 10)
-	root.add_child(grid)
-
-	grid.add_child(_make_stat_card("Equipamentos", str(stats.get("total", 0)), "Cadastrados no estoque", BLUE, trends.get("Equipamentos", {}), Callable(self, "_show_list_with_status").bind("all")))
-	grid.add_child(_make_stat_card("Em estoque", str(stats.get("available", 0)), "Disponiveis para uso", GREEN, trends.get("Em estoque", {}), Callable(self, "_show_list_with_status").bind("estoque")))
-	grid.add_child(_make_stat_card("Reserva", str(stats.get("reserved", 0)), "Aparelhos em reserva", YELLOW, trends.get("Reserva", {}), Callable(self, "_show_list_with_status").bind("reserva")))
-	grid.add_child(_make_stat_card("Instalados", str(stats.get("installed", 0)), "Aparelhos instalados", BLUE_DARK, trends.get("Instalados", {}), Callable(self, "_show_list_with_status").bind("instalado")))
-	grid.add_child(_make_stat_card("Manutencoes", str(stats.get("maintenance", 0)), "Encaminhados para revisao", ORANGE, trends.get("Manutencoes", {}), Callable(self, "_show_list_with_status").bind("manutencao")))
-	grid.add_child(_make_stat_card("Inativos", str(stats.get("inactive", 0)), "Fora da operacao", RED, trends.get("Inativos", {}), Callable(self, "_show_list_with_status").bind("inativo")))
+	var metrics := HBoxContainer.new()
+	metrics.name = "DashboardMetricCards"
+	metrics.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	metrics.custom_minimum_size = Vector2(0, 176)
+	metrics.add_theme_constant_override("separation", 12)
+	root.add_child(metrics)
+	var featured := _make_stat_card("Equipamentos", str(stats.get("total", 0)), "Total de equipamentos", BLUE, trends.get("Equipamentos", {}), Callable(self, "_show_list_with_status").bind("all"))
+	featured.custom_minimum_size = Vector2(264, 176)
+	featured.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	metrics.add_child(featured)
+	metrics.add_child(_make_stat_card("Em estoque", str(stats.get("available", 0)), "Disponíveis para uso", GREEN, trends.get("Em estoque", {}), Callable(self, "_show_list_with_status").bind("estoque")))
+	metrics.add_child(_make_stat_card("Em reserva", str(stats.get("reserved", 0)), "Aparelhos em reserva", YELLOW, trends.get("Em reserva", trends.get("Reserva", {})), Callable(self, "_show_list_with_status").bind("reserva")))
+	metrics.add_child(_make_stat_card("Instalados", str(stats.get("installed", 0)), "Aparelhos instalados", BLUE, trends.get("Instalados", {}), Callable(self, "_show_list_with_status").bind("instalado")))
+	metrics.add_child(_make_stat_card("Em manutenção", str(stats.get("maintenance", 0)), "Encaminhados para revisão", ORANGE, trends.get("Em manutenção", trends.get("Manutencoes", {})), Callable(self, "_show_list_with_status").bind("manutencao")))
+	metrics.add_child(_make_stat_card("Inativos", str(stats.get("inactive", 0)), "Fora da operação", RED, trends.get("Inativos", {}), Callable(self, "_show_list_with_status").bind("inativo")))
 
 	var charts := HBoxContainer.new()
 	charts.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	charts.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	charts.custom_minimum_size = Vector2(0, 326)
+	var chart_height := 346.0 if get_viewport_rect().size.y >= 930.0 else 300.0
+	charts.custom_minimum_size = Vector2(0, chart_height)
 	charts.add_theme_constant_override("separation", 12)
 	root.add_child(charts)
 
@@ -15365,7 +14441,7 @@ func _build_dashboard_view() -> Control:
 	charts.add_child(_build_situation_panel(stats))
 	root.add_child(_build_diagnostics_panel(diagnostics))
 
-	return root
+	return scroll
 
 
 func _dashboard_day_greeting() -> String:
@@ -15387,9 +14463,9 @@ func _capture_dashboard_trends(stats: Dictionary) -> Dictionary:
 	var definitions := {
 		"Equipamentos": {"key": "total", "positive_when_up": true},
 		"Em estoque": {"key": "available", "positive_when_up": true},
-		"Reserva": {"key": "reserved", "positive_when_up": false},
+		"Em reserva": {"key": "reserved", "positive_when_up": false},
 		"Instalados": {"key": "installed", "positive_when_up": true},
-		"Manutencoes": {"key": "maintenance", "positive_when_up": false},
+		"Em manutenção": {"key": "maintenance", "positive_when_up": false},
 		"Inativos": {"key": "inactive", "positive_when_up": false},
 	}
 	var current: Dictionary = {"captured_at": int(Time.get_unix_time_from_system())}
@@ -15446,18 +14522,18 @@ func _build_list_view() -> Control:
 	var controls_margin := MarginContainer.new()
 	controls_margin.add_theme_constant_override("margin_left", 16)
 	controls_margin.add_theme_constant_override("margin_right", 16)
-	controls_margin.add_theme_constant_override("margin_top", 8)
-	controls_margin.add_theme_constant_override("margin_bottom", 8)
+	controls_margin.add_theme_constant_override("margin_top", 14)
+	controls_margin.add_theme_constant_override("margin_bottom", 14)
 	controls_panel.add_child(controls_margin)
 
 	var controls_stack := VBoxContainer.new()
 	controls_stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	controls_stack.add_theme_constant_override("separation", 6)
+	controls_stack.add_theme_constant_override("separation", 12)
 	controls_margin.add_child(controls_stack)
 
 	var toolbar := HBoxContainer.new()
 	toolbar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	toolbar.add_theme_constant_override("separation", 5)
+	toolbar.add_theme_constant_override("separation", 8)
 	controls_stack.add_child(toolbar)
 
 	if not _is_regional_branch():
@@ -15465,7 +14541,7 @@ func _build_list_view() -> Control:
 
 	search_input = LineEdit.new()
 	search_input.placeholder_text = "Buscar por placa, série, telefone, chip ou operadora"
-	search_input.custom_minimum_size = Vector2(300, 30)
+	search_input.custom_minimum_size = Vector2(320, 40)
 	search_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	search_input.right_icon = load(ICON_DIR + "pesquisar.svg")
 
@@ -15486,18 +14562,14 @@ func _build_list_view() -> Control:
 	)
 
 	toolbar.add_child(search_input)
-	var clear_search_button := _make_compact_inventory_toolbar_button(
-		"Limpar", Color("#eef3f8"), BORDER, BLUE_DARK, Vector2(76, 30), _clear_search
-	)
-	toolbar.add_child(clear_search_button)
+	toolbar.add_child(_make_action_button("Limpar", Color("#eef3f8"), BORDER, BLUE_DARK, Vector2(98, 40), _clear_search))
 
 	search_busy_label = Label.new()
 	search_busy_label.text = ""
-	search_busy_label.custom_minimum_size = Vector2(0, 30)
-	search_busy_label.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	search_busy_label.custom_minimum_size = Vector2(78, 40)
 	search_busy_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	search_busy_label.add_theme_font_override("font", UI_FONT)
-	search_busy_label.add_theme_font_size_override("font_size", 14)
+	search_busy_label.add_theme_font_size_override("font_size", 16)
 	search_busy_label.add_theme_color_override("font_color", MUTED)
 	toolbar.add_child(search_busy_label)
 
@@ -15507,17 +14579,15 @@ func _build_list_view() -> Control:
 	search_busy_timer.timeout.connect(_animate_search_busy)
 	search_input.add_child(search_busy_timer)
 
-	toolbar.add_child(_make_compact_inventory_toolbar_button(
-		"Exportar XLSX", GREEN, GREEN, Color.WHITE, Vector2(110, 30), _request_export_all_registrations_xlsx
-	))
+	toolbar.add_child(_make_action_button("Exportar XLSX", GREEN, GREEN, Color.WHITE, Vector2(145, 40), _request_export_all_registrations_xlsx))
 
 	if not _is_regional_branch():
-		inventory_reset_button = _make_compact_inventory_toolbar_button(
+		inventory_reset_button = _make_action_button(
 			"Reconectar",
 			Color("#eef3f8"),
 			BORDER,
 			BLUE_DARK,
-			Vector2(98, 30),
+			Vector2(136, 40),
 			_on_inventory_reconnect_pressed
 		)
 		inventory_reset_button.icon = load(ICON_DIR + "atualizar.svg")
@@ -15525,12 +14595,12 @@ func _build_list_view() -> Control:
 		inventory_reset_button.tooltip_text = "Limpar cache operacional, cancelar consultas pendentes e reconectar as APIs"
 		toolbar.add_child(inventory_reset_button)
 
-		var replacement_button := _make_compact_inventory_toolbar_button(
+		var replacement_button := _make_action_button(
 			"Trocar aparelho",
 			BLUE,
 			BLUE,
 			Color.WHITE,
-			Vector2(116, 30),
+			Vector2(160, 40),
 			_show_appliance_replacement_modal
 		)
 		replacement_button.icon = load(ICON_DIR + "atualizar.svg")
@@ -15538,58 +14608,33 @@ func _build_list_view() -> Control:
 		replacement_button.tooltip_text = "Abrir a substituicao controlada entre duas placas"
 		toolbar.add_child(replacement_button)
 
-	var inventory_filters_row := HBoxContainer.new()
-	inventory_filters_row.name = "InventoryFiltersAndPeriod"
-	inventory_filters_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	inventory_filters_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	inventory_filters_row.add_theme_constant_override("separation", 8)
-	controls_stack.add_child(inventory_filters_row)
 	status_quick_filters = _build_status_quick_filters()
-	status_quick_filters.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
-	status_quick_filters.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	inventory_filters_row.add_child(status_quick_filters)
+	controls_stack.add_child(status_quick_filters)
 	_sync_status_quick_filters()
-	var filter_divider := ColorRect.new()
-	filter_divider.custom_minimum_size = Vector2(1, 28)
-	filter_divider.color = Color("#e4ebf2")
-	filter_divider.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	inventory_filters_row.add_child(filter_divider)
-	var filter_spacer := Control.new()
-	filter_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	inventory_filters_row.add_child(filter_spacer)
 
 	var inventory_period_row := HBoxContainer.new()
 	inventory_period_row.name = "InventoryDateRange"
-	inventory_period_row.size_flags_horizontal = Control.SIZE_SHRINK_END
-	inventory_period_row.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	inventory_period_row.add_theme_constant_override("separation", 6)
-	inventory_filters_row.add_child(inventory_period_row)
+	inventory_period_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	inventory_period_row.add_theme_constant_override("separation", 8)
+	controls_stack.add_child(inventory_period_row)
 	inventory_date_input = LineEdit.new()
 	inventory_date_input.placeholder_text = "Data inicial"
 	inventory_date_input.text = _system_log_calendar_display_value(inventory_start_date)
-	inventory_date_input.custom_minimum_size = Vector2(0, 28)
+	inventory_date_input.custom_minimum_size = Vector2(0, 34)
 	_style_line_edit(inventory_date_input)
 	inventory_date_input.text_submitted.connect(func(_text): _apply_inventory_date_filters())
-	var inventory_start_group := _make_log_filter_group("Período inicial", _make_system_log_date_picker(inventory_date_input, false), 188, false)
-	inventory_start_group.custom_minimum_size = Vector2(188, 0)
-	inventory_period_row.add_child(inventory_start_group)
+	inventory_period_row.add_child(_make_log_filter_group("Período inicial", _make_system_log_date_picker(inventory_date_input, false), 0, true))
 	inventory_end_date_input = LineEdit.new()
 	inventory_end_date_input.placeholder_text = "Data final"
 	inventory_end_date_input.text = _system_log_calendar_display_value(inventory_end_date)
-	inventory_end_date_input.custom_minimum_size = Vector2(0, 28)
+	inventory_end_date_input.custom_minimum_size = Vector2(0, 34)
 	_style_line_edit(inventory_end_date_input)
 	inventory_end_date_input.text_submitted.connect(func(_text): _apply_inventory_date_filters())
-	var inventory_end_group := _make_log_filter_group("Período final", _make_system_log_date_picker(inventory_end_date_input, true), 188, false)
-	inventory_end_group.custom_minimum_size = Vector2(188, 0)
-	inventory_period_row.add_child(inventory_end_group)
-	var apply_inventory_period := _make_compact_inventory_toolbar_button("Aplicar", BLUE, BLUE, Color.WHITE, Vector2(80, 28), _apply_inventory_date_filters)
-	apply_inventory_period.icon = load(ICON_DIR + "filtro.svg")
-	apply_inventory_period.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	inventory_period_row.add_child(_make_log_filter_group("Período final", _make_system_log_date_picker(inventory_end_date_input, true), 0, true))
+	var apply_inventory_period := _make_action_button("Aplicar", BLUE, BLUE, Color.WHITE, Vector2(86, 34), _apply_inventory_date_filters)
 	apply_inventory_period.tooltip_text = "Filtrar os equipamentos pelo período informado"
 	inventory_period_row.add_child(apply_inventory_period)
-	var clear_inventory_period := _make_compact_inventory_toolbar_button("Limpar período", Color("#eef3f8"), BORDER, BLUE_DARK, Vector2(118, 28), _clear_inventory_date_filters)
-	clear_inventory_period.icon = load(ICON_DIR + "alerts/close.svg")
-	clear_inventory_period.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	var clear_inventory_period := _make_action_button("Limpar período", Color("#eef3f8"), BORDER, BLUE_DARK, Vector2(118, 34), _clear_inventory_date_filters)
 	clear_inventory_period.tooltip_text = "Remover o filtro de período"
 	inventory_period_row.add_child(clear_inventory_period)
 
@@ -24551,7 +23596,7 @@ func _load_location_tile(texture_rect: TextureRect, marker: Control, lat: float,
 			continue
 		for tile_x in range(first_tile.x, last_tile.x + 1):
 			var wrapped_x := posmod(tile_x, max_tile)
-			var response := await _http_get_bytes(OSM_TILE_URL % [zoom, wrapped_x, tile_y])
+			var response := await _http_get_bytes(BigMapTileProvider.tile_url(zoom, wrapped_x, tile_y))
 			if not bool(response.get("ok", false)):
 				continue
 
@@ -24599,33 +23644,15 @@ func _blit_visible_tile(target: Image, tile_image: Image, dest: Vector2i, viewpo
 
 
 func _lat_lng_to_tile(lat: float, lng: float, zoom: int) -> Dictionary:
-	var lat_rad := deg_to_rad(lat)
-	var n := pow(2.0, float(zoom))
-	var x_float := (lng + 180.0) / 360.0 * n
-	var y_float := (1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / PI) / 2.0 * n
-	var x := floori(x_float)
-	var y := floori(y_float)
-	return {
-		"x": x,
-		"y": y,
-		"frac_x": clampf(x_float - float(x), 0.0, 1.0),
-		"frac_y": clampf(y_float - float(y), 0.0, 1.0),
-	}
+	return BigMapProjection.lat_lng_to_tile(lat, lng, zoom)
 
 
 func _lat_lng_to_world_pixel(lat: float, lng: float, zoom: int) -> Vector2:
-	var tile := _lat_lng_to_tile(lat, lng, zoom)
-	var x := float(tile.get("x", 0)) + float(tile.get("frac_x", 0.0))
-	var y := float(tile.get("y", 0)) + float(tile.get("frac_y", 0.0))
-	return Vector2(x * 256.0, y * 256.0)
+	return BigMapProjection.lat_lng_to_world_pixel(lat, lng, zoom)
 
 
 func _world_pixel_to_lat_lng(point: Vector2, zoom: int) -> Vector2:
-	var n := pow(2.0, float(zoom))
-	var longitude := point.x / 256.0 / n * 360.0 - 180.0
-	var mercator_y := PI * (1.0 - 2.0 * point.y / 256.0 / n)
-	var latitude := rad_to_deg(atan(sinh(mercator_y)))
-	return Vector2(latitude, longitude)
+	return BigMapProjection.world_pixel_to_lat_lng(point, zoom)
 
 
 func _openstreetmap_url(lat: float, lng: float) -> String:
@@ -38539,7 +37566,6 @@ func _confirm_smart_registered_equipment(request: Dictionary, result: Dictionary
 			"confirmation_pending": true,
 			"message": str(confirmed.get("message", "O equipamento ainda nao foi confirmado pela API.")),
 			"equipment": result,
-			"request": request,
 		}
 	var row := confirmed.get("row", {}) as Dictionary
 	if not _grupo_rs_api_equipment_row_matches_request(row, request):
@@ -38550,7 +37576,6 @@ func _confirm_smart_registered_equipment(request: Dictionary, result: Dictionary
 			"message": "A API localizou a serie, mas os dados do chip ainda divergem da solicitacao.",
 			"equipment": result,
 			"row": row,
-			"request": request,
 		}
 	return {"ok": true, "result": result, "row": row}
 
@@ -38569,28 +37594,7 @@ func _perform_equipment_registration(request: Dictionary) -> Dictionary:
 		return {"ok": false, "message": "A busca em segundo plano nao confirmou ICCID completo, telefone e APN do chip. O cadastro local foi preservado; tente novamente apos a consulta concluir."}
 	if _equipment_registration_timed_out():
 		return _equipment_registration_timeout_result("validacao inicial")
-	var equipment_result: Dictionary
-	# Depois que o POST foi aceito, nunca repita o cadastro do equipamento. A
-	# fila pode chamar este fluxo novamente somente para continuar a partir da
-	# leitura confirmada do IMEI.
-	if bool(request.get("_skip_equipment_registration", false)):
-		var pending_row: Variant = request.get("_pending_equipment_row", {})
-		if typeof(pending_row) != TYPE_DICTIONARY or (pending_row as Dictionary).is_empty():
-			return {
-				"ok": true,
-				"partial": true,
-				"confirmation_pending": true,
-				"message": "O equipamento foi aceito, mas a leitura de confirmacao ainda nao retornou uma linha segura.",
-				"request": request,
-			}
-		equipment_result = {
-			"ok": true,
-			"row": (pending_row as Dictionary).duplicate(true),
-			"api": true,
-			"confirmed_after_pending": true,
-		}
-	else:
-		equipment_result = await _register_or_find_modern_equipment(request)
+	var equipment_result := await _register_or_find_modern_equipment(request)
 	if _equipment_registration_timed_out():
 		return _equipment_registration_timeout_result("confirmacao do equipamento")
 	if bool(equipment_result.get("confirmation_pending", false)):
@@ -38745,72 +37749,6 @@ func _perform_equipment_registration(request: Dictionary) -> Dictionary:
 	if transport_message != "":
 		message = "%s. %s" % [transport_message, message]
 	return {"ok": false, "message": message, "partial": true}
-
-
-func _retry_pending_equipment_registration(request: Dictionary, pending_result: Dictionary) -> Dictionary:
-	"""Reconcilia uma escrita aceita sem repetir o POST.
-
-	A API de cadastro pode responder antes de a listagem estar consistente. O
-	IMEI e a placa enviados continuam sendo a mesma operacao; apenas lemos até
-	que a linha apareça e retomamos a etapa seguinte.
-	"""
-	var serial := _digits_only(str(request.get("serial", request.get("remote_serial", ""))))
-	if serial == "":
-		return pending_result
-	var equipment_pending := pending_result.get("equipment", {}) as Dictionary
-	var vehicle_pending := pending_result.get("vehicle", {}) as Dictionary
-
-	# Primeiro caso: o equipamento foi aceito, mas ainda nao apareceu. Depois da
-	# leitura confirmada, continua para o vinculo da placa sem novo cadastro.
-	if bool(equipment_pending.get("confirmation_pending", false)) and vehicle_pending.is_empty():
-		var last_message := str(pending_result.get("message", "Aguardando publicacao do equipamento."))
-		for attempt in range(REMOTE_PENDING_CONFIRMATION_ATTEMPTS + 2):
-			if attempt > 0:
-				await get_tree().create_timer(REMOTE_PENDING_CONFIRMATION_DELAY_SECONDS).timeout
-			var confirmed := await _grupo_rs_api_find_equipment(serial, true)
-			if bool(confirmed.get("ok", false)):
-				request["_skip_equipment_registration"] = true
-				request["_pending_equipment_row"] = (confirmed.get("row", {}) as Dictionary).duplicate(true)
-				request.erase("_smart_confirmation_pending")
-				return await _perform_equipment_registration(request)
-			last_message = str(confirmed.get("message", last_message))
-		var unresolved := pending_result.duplicate(true)
-		unresolved["ok"] = true
-		unresolved["partial"] = true
-		unresolved["confirmation_pending"] = true
-		unresolved["message"] = "%s A confirmacao sera retomada automaticamente sem repetir o cadastro." % last_message
-		unresolved["request"] = request
-		return unresolved
-
-	# Segundo caso: o equipamento ja foi confirmado, mas a associacao veicular
-	# ainda nao apareceu. Confirme a placa pela leitura completa do portal/API.
-	if not vehicle_pending.is_empty() or not equipment_pending.is_empty():
-		var plate := _format_grupo_rs_vehicle_plate(str(request.get("plate", request.get("vehicle_target_plate", ""))))
-		if plate != "":
-			var last_message := str(pending_result.get("message", "Aguardando confirmacao da placa."))
-			for attempt in range(REMOTE_PENDING_CONFIRMATION_ATTEMPTS + 2):
-				if attempt > 0:
-					await get_tree().create_timer(REMOTE_PENDING_CONFIRMATION_DELAY_SECONDS).timeout
-				var confirmation := await _verify_modern_vehicle_registration(serial, plate)
-				if bool(confirmation.get("ok", false)):
-					var resumed := pending_result.duplicate(true)
-					resumed["ok"] = true
-					resumed.erase("confirmation_pending")
-					resumed["partial"] = false
-					resumed["api_vehicle"] = true
-					resumed["full_verification"] = confirmation
-					request.erase("_smart_confirmation_pending")
-					resumed["request"] = request
-					return resumed
-				last_message = str(confirmation.get("message", last_message))
-			var unresolved := pending_result.duplicate(true)
-			unresolved["ok"] = true
-			unresolved["partial"] = true
-			unresolved["confirmation_pending"] = true
-			unresolved["message"] = "%s A confirmacao sera retomada automaticamente sem repetir a operacao." % last_message
-			unresolved["request"] = request
-			return unresolved
-	return pending_result
 
 
 func _register_or_find_modern_equipment(request: Dictionary) -> Dictionary:
@@ -39495,40 +38433,6 @@ func _ensure_firebase_modification_saved(serial: String = "", expected_product: 
 	}
 
 
-func _ensure_firebase_registration_saved(serial: String = "", expected_product: Dictionary = {}) -> Dictionary:
-	"""Persiste e rele a inclusao do cadastro antes de liberar a fila.
-
-	O cadastro remoto pode ser confirmado antes da sincronizacao do espelho. A
-	operacao so deve aparecer como concluida quando a escrita do Firebase e a
-	leitura da mesma serie tiverem sido confirmadas.
-	"""
-	if store == null:
-		return {"ok": false, "message": "A base operacional nao esta disponivel para salvar o cadastro no Firebase."}
-	var firebase_sync := _firebase_sync()
-	if firebase_sync == null or not firebase_sync.has_method("sync_now"):
-		return {"ok": false, "message": "O sincronizador do Firebase nao esta disponivel; o cadastro remoto foi preservado como pendente."}
-	var synced: Variant = await firebase_sync.call("sync_now")
-	var status: Dictionary = synced as Dictionary if typeof(synced) == TYPE_DICTIONARY else {}
-	if not bool(status.get("ok", false)):
-		return {
-			"ok": false,
-			"message": "O cadastro remoto foi confirmado, mas o Firebase recusou ou nao concluiu a gravacao.",
-			"status": status,
-		}
-	if not expected_product.is_empty() and firebase_sync.has_method("verify_product_persisted"):
-		var verification: Variant = await firebase_sync.call("verify_product_persisted", serial, expected_product)
-		var verified: Dictionary = verification as Dictionary if typeof(verification) == TYPE_DICTIONARY else {}
-		if not bool(verified.get("ok", false)):
-			return {
-				"ok": false,
-				"message": str(verified.get("message", "O Firebase nao confirmou a leitura do cadastro.")),
-				"status": status,
-				"verification": verified,
-			}
-		return {"ok": true, "status": status, "verification": verified, "serial": serial}
-	return {"ok": true, "status": status, "serial": serial}
-
-
 func _choose_modern_grupo_rs_equipment_row_by_serial_exact(rows: Array[Dictionary], serial: String) -> Dictionary:
 	var target := _search_key(serial)
 	var selected: Dictionary = {}
@@ -39873,12 +38777,12 @@ func _show_vehicle_reassignment_password_dialog(request: Dictionary) -> void:
 
 
 func _on_remote_operation_localized(kind: String, serial: String) -> void:
+	if kind != "Modificacao":
+		_refresh_table()
+		return
 	var clean_serial := _digits_only(serial)
 	var current_serial := _digits_only(_field_text("imei")) if form_fields.has("imei") else ""
-	# A fila conclui a operacao enquanto o formulario ainda esta aberto. Para
-	# cadastro e modificacao, voltar para a lista evita deixar o operador preso
-	# em uma tela com "confirmacao pendente" depois que a API e o Firebase ja
-	# confirmaram a mesma serie.
+	# A fila conclui a modificacao enquanto o formulario ainda esta aberto.
 	# Nessa situacao editing_sku pode estar vazio (por exemplo, aparelho
 	# legado/inicializado fora do Firebase), portanto a presenca de um campo IMEI
 	# e a evidencia mais confiavel de que devemos voltar para a lista.
@@ -44895,7 +43799,7 @@ func _build_operator_panel(stats: Dictionary) -> Control:
 	stack.add_theme_constant_override("separation", 0)
 	panel.add_child(stack)
 
-	stack.add_child(_make_chart_header("Aparelhos por operadora", BLUE, Callable(self, "_show_list"), "Ver estoque"))
+	stack.add_child(_make_chart_header("Aparelhos por operadora", BLUE, Callable(self, "_show_list"), "Ver detalhes"))
 
 	var margin := MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", 28)
@@ -44913,7 +43817,7 @@ func _build_operator_panel(stats: Dictionary) -> Control:
 	rows.add_theme_constant_override("separation", 7)
 	body.add_child(rows)
 
-	var total := maxi(int(stats.get("total", 0)), 1)
+	var total := maxi(int(stats.get("total", 0)), 0)
 	var operators: Dictionary = stats.get("operators", {})
 	var headings := HBoxContainer.new()
 	headings.add_theme_constant_override("separation", 10)
@@ -44922,21 +43826,21 @@ func _build_operator_panel(stats: Dictionary) -> Control:
 	headings.add_child(_make_dashboard_table_label("% do total", 64, HORIZONTAL_ALIGNMENT_RIGHT, MUTED, 11))
 	rows.add_child(headings)
 
-	var operator_order := ["Claro", "Sem operadora", "Tim", "Vivo"]
+	var operator_order := ["Claro", "Sem operadora", "TIM", "Vivo"]
 	var colors := {
-		"Claro": Color("#2db465"),
-		"Sem operadora": Color("#f3c611"),
-		"Tim": Color("#ef7b1a"),
-		"Vivo": Color("#c83b32"),
+		"Claro": Color("#e84b3f"),
+		"Sem operadora": Color("#f6b91a"),
+		"TIM": Color("#1479c9"),
+		"Vivo": Color("#7955d9"),
 	}
 	var donut_segments: Array[Dictionary] = []
 	for operator_name in operator_order:
-		var value := int(operators.get(operator_name, 0))
+		var value := _dashboard_operator_value(operators, operator_name)
 		rows.add_child(_make_dashboard_operator_row(operator_name, value, total, colors.get(operator_name, MUTED)))
 		donut_segments.append({"value": value, "color": colors.get(operator_name, MUTED)})
 	for key in operators:
 		var extra_name := str(key)
-		if extra_name in operator_order:
+		if extra_name in operator_order or extra_name.to_lower() == "tim":
 			continue
 		var extra_value := int(operators.get(key, 0))
 		rows.add_child(_make_dashboard_operator_row(extra_name, extra_value, total, BLUE))
@@ -44951,10 +43855,11 @@ func _build_operator_panel(stats: Dictionary) -> Control:
 	summary.add_theme_constant_override("separation", 8)
 	footer.add_child(summary)
 	var installed_total := int(stats.get("installed", 0))
-	var with_operator := total - int(operators.get("Sem operadora", 0))
+	var without_operator := _dashboard_operator_value(operators, "Sem operadora")
+	var with_operator := maxi(total - without_operator, 0)
 	summary.add_child(_make_operator_summary_metric("Total de aparelhos", str(total), "100%", BLUE_DARK))
 	summary.add_child(_make_operator_summary_metric("Com operadora", str(with_operator), _dashboard_percent_text(with_operator, total), GREEN))
-	summary.add_child(_make_operator_summary_metric("Sem operadora", str(int(operators.get("Sem operadora", 0))), _dashboard_percent_text(int(operators.get("Sem operadora", 0)), total), YELLOW))
+	summary.add_child(_make_operator_summary_metric("Sem operadora", str(without_operator), _dashboard_percent_text(without_operator, total), YELLOW))
 	var donut_host := Control.new()
 	donut_host.custom_minimum_size = Vector2(150, 145)
 	footer.add_child(donut_host)
@@ -44986,6 +43891,16 @@ func _build_operator_panel(stats: Dictionary) -> Control:
 	return panel
 
 
+func _dashboard_operator_value(operators: Dictionary, canonical_name: String) -> int:
+	if operators.has(canonical_name):
+		return int(operators.get(canonical_name, 0))
+	var wanted := canonical_name.to_lower()
+	for key in operators:
+		if str(key).strip_edges().to_lower() == wanted:
+			return int(operators.get(key, 0))
+	return 0
+
+
 func _make_dashboard_table_label(text_value: String, width: int, alignment: HorizontalAlignment, color: Color, font_size: int) -> Label:
 	var label := Label.new()
 	label.text = text_value
@@ -45002,7 +43917,14 @@ func _make_dashboard_operator_row(operator_name: String, value: int, total: int,
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_theme_constant_override("separation", 8)
-	var name := _make_dashboard_table_label(operator_name, 130, HORIZONTAL_ALIGNMENT_LEFT, TEXT, 12)
+	var dot := Label.new()
+	dot.text = "●"
+	dot.custom_minimum_size = Vector2(12, 22)
+	dot.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	dot.add_theme_font_size_override("font_size", 12)
+	dot.add_theme_color_override("font_color", color)
+	row.add_child(dot)
+	var name := _make_dashboard_table_label(operator_name, 112, HORIZONTAL_ALIGNMENT_LEFT, TEXT, 12)
 	row.add_child(name)
 	var progress := ProgressBar.new()
 	progress.min_value = 0
@@ -45055,7 +43977,7 @@ func _make_operator_summary_metric(title_text: String, value_text: String, hint_
 
 
 func _dashboard_percent_text(value: int, total: int) -> String:
-	return "0,0%%" if total <= 0 else "%.1f%%" % ((float(value) / float(total)) * 100.0)
+	return "0,0%" if total <= 0 else "%.1f%%" % ((float(value) / float(total)) * 100.0)
 
 
 func _build_situation_panel(_stats: Dictionary) -> Control:
@@ -45068,7 +43990,7 @@ func _build_situation_panel(_stats: Dictionary) -> Control:
 	stack.add_theme_constant_override("separation", 0)
 	panel.add_child(stack)
 
-	stack.add_child(_make_chart_header("Saude do servidor", GREEN, Callable(self, "_show_system_health"), "Ver detalhes"))
+	stack.add_child(_make_chart_header("Saúde do servidor", GREEN, Callable(self, "_show_system_health"), "Ver detalhes"))
 
 	var margin := MarginContainer.new()
 	margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -45098,7 +44020,7 @@ func _build_situation_panel(_stats: Dictionary) -> Control:
 	core_box.add_child(server_health_core)
 
 	server_health_state_label = Label.new()
-	server_health_state_label.text = "Conectando"
+	server_health_state_label.text = "Servidor conectado"
 	server_health_state_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	server_health_state_label.add_theme_font_override("font", UI_FONT)
 	server_health_state_label.add_theme_font_size_override("font_size", 19)
@@ -45117,14 +44039,14 @@ func _build_situation_panel(_stats: Dictionary) -> Control:
 	body.add_child(details)
 
 	var eyebrow := Label.new()
-	eyebrow.text = "FIREBASE REALTIME DATABASE"
+	eyebrow.text = "Firebase / Realtime Database"
 	eyebrow.add_theme_font_override("font", UI_FONT)
 	eyebrow.add_theme_font_size_override("font_size", 13)
 	eyebrow.add_theme_color_override("font_color", MUTED)
 	details.add_child(eyebrow)
 
 	server_health_detail_label = Label.new()
-	server_health_detail_label.text = "Verificando a conexao segura..."
+	server_health_detail_label.text = "Servidor conectado\nFirebase / Realtime Database"
 	server_health_detail_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	server_health_detail_label.custom_minimum_size = Vector2(330, 54)
 	server_health_detail_label.add_theme_font_override("font", UI_FONT)
@@ -45155,10 +44077,11 @@ func _build_situation_panel(_stats: Dictionary) -> Control:
 	metrics.add_child(server_health_sync_label)
 
 	var protection := Label.new()
-	protection.text = "Sem modo local: dados bloqueados quando a conexao cai"
+	protection.text = "Servidor conectado"
 	protection.add_theme_font_override("font", UI_FONT)
 	protection.add_theme_font_size_override("font_size", 14)
 	protection.add_theme_color_override("font_color", GREEN)
+	server_health_connection_label = protection
 	details.add_child(protection)
 
 	var history_title := Label.new()
@@ -45243,6 +44166,12 @@ func _build_diagnostics_panel(diagnostics: Array) -> Control:
 	count.add_theme_font_size_override("font_size", 14)
 	count.add_theme_color_override("font_color", RED if not dashboard_diagnostics.is_empty() else GREEN)
 	header.add_child(count)
+	var mark_read_button := _make_action_button("Marcar lidos", Color("#eef5fb"), Color("#c8dceb"), BLUE_DARK, Vector2(112, 30), _mark_dashboard_alerts_read)
+	mark_read_button.icon = load(ICON_DIR + "alerts/success.svg")
+	header.add_child(mark_read_button)
+	var history_button := _make_action_button("Ver histórico", Color("#eef5fb"), Color("#c8dceb"), BLUE_DARK, Vector2(112, 30), _show_system_log)
+	history_button.icon = load(ICON_DIR + "atualizar.svg")
+	header.add_child(history_button)
 
 	var tools := HBoxContainer.new()
 	tools.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -45258,8 +44187,6 @@ func _build_diagnostics_panel(diagnostics: Array) -> Control:
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	tools.add_child(spacer)
-	tools.add_child(_make_action_button("Marcar lidos", Color("#eef5fb"), Color("#c8dceb"), BLUE_DARK, Vector2(112, 30), _mark_dashboard_alerts_read))
-	tools.add_child(_make_action_button("Ver historico", Color("#eef5fb"), Color("#c8dceb"), BLUE_DARK, Vector2(112, 30), _show_system_log))
 
 	dashboard_alert_body = VBoxContainer.new()
 	dashboard_alert_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -45277,6 +44204,13 @@ func _make_dashboard_alert_filter_button(filter_key: String, label_text: String)
 	button.focus_mode = Control.FOCUS_NONE
 	button.add_theme_font_override("font", UI_FONT)
 	button.add_theme_font_size_override("font_size", 11)
+	var icon_path := ICON_DIR + "alerts/info.svg"
+	if filter_key == "critical":
+		icon_path = ICON_DIR + "alerts/error.svg"
+	elif filter_key == "warning":
+		icon_path = ICON_DIR + "alerts/warning.svg"
+	button.icon = load(icon_path)
+	button.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	button.pressed.connect(func(): _set_dashboard_alert_filter(filter_key))
 	dashboard_alert_filter_buttons[filter_key] = button
 	_style_dashboard_alert_filter_button(button, filter_key == dashboard_alert_filter)
@@ -45391,17 +44325,22 @@ func _make_chart_header(text: String, color: Color, action: Callable = Callable(
 	row.add_theme_constant_override("separation", 10)
 	margin.add_child(row)
 
-	var accent := ColorRect.new()
-	accent.color = color
-	accent.custom_minimum_size = Vector2(42, 4)
-	accent.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	row.add_child(accent)
+	var icon_panel := PanelContainer.new()
+	icon_panel.custom_minimum_size = Vector2(32, 32)
+	icon_panel.add_theme_stylebox_override("panel", _style_box(Color(color, 0.12), Color.TRANSPARENT, 0, 16))
+	var icon_center := CenterContainer.new()
+	icon_panel.add_child(icon_center)
+	var icon_kind := "assistente" if text.to_lower().contains("saude") or text.to_lower().contains("saúde") else "dashboard"
+	var header_icon := _make_sidebar_icon(icon_kind, color)
+	header_icon.custom_minimum_size = Vector2(19, 19)
+	icon_center.add_child(header_icon)
+	row.add_child(icon_panel)
 
 	var label := Label.new()
 	label.text = text
 	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	label.add_theme_font_override("font", UI_FONT)
-	label.add_theme_font_size_override("font_size", 20)
+	label.add_theme_font_size_override("font_size", 19)
 	label.add_theme_color_override("font_color", TEXT)
 	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(label)
@@ -45449,13 +44388,16 @@ func _make_bar_row(label_text: String, value: int, max_value: int, color: Color)
 
 func _make_stat_card(title_text: String, value_text: String, hint_text: String, fill: Color, trend: Dictionary = {}, action: Callable = Callable()) -> Control:
 	var panel := Button.new()
-	panel.custom_minimum_size = Vector2(0, 96)
+	var featured := title_text == "Equipamentos"
+	panel.custom_minimum_size = Vector2(0, 182)
 	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	panel.text = ""
 	panel.focus_mode = Control.FOCUS_NONE
-	panel.add_theme_stylebox_override("normal", AppDesignSystem.surface(AppDesignSystem.SURFACE, AppDesignSystem.BORDER, 1, 9, false))
-	panel.add_theme_stylebox_override("hover", AppDesignSystem.surface(Color("#f8fcff"), Color("#a9cfee"), 1, 9, false))
-	panel.add_theme_stylebox_override("pressed", AppDesignSystem.surface(Color("#eef7ff"), BLUE, 1, 9, false))
+	var base_fill := fill if featured else AppDesignSystem.SURFACE
+	var base_border := fill if featured else AppDesignSystem.BORDER
+	panel.add_theme_stylebox_override("normal", AppDesignSystem.surface(base_fill, base_border, 1, 10, false))
+	panel.add_theme_stylebox_override("hover", AppDesignSystem.surface(fill.lightened(0.06) if featured else Color("#f8fcff"), fill if featured else Color("#a9cfee"), 1, 10, false))
+	panel.add_theme_stylebox_override("pressed", AppDesignSystem.surface(fill.darkened(0.07) if featured else Color("#eef7ff"), fill.darkened(0.05) if featured else BLUE, 1, 10, false))
 	if action.is_valid():
 		panel.tooltip_text = "Abrir %s" % title_text
 		panel.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
@@ -45463,84 +44405,96 @@ func _make_stat_card(title_text: String, value_text: String, hint_text: String, 
 
 	var margin := MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", 16)
-	margin.add_theme_constant_override("margin_right", 16)
-	margin.add_theme_constant_override("margin_top", 13)
-	margin.add_theme_constant_override("margin_bottom", 13)
+	margin.add_theme_constant_override("margin_right", 14)
+	margin.add_theme_constant_override("margin_top", 14)
+	margin.add_theme_constant_override("margin_bottom", 12)
 	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(margin)
 
-	var row := HBoxContainer.new()
-	row.alignment = BoxContainer.ALIGNMENT_BEGIN
-	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_theme_constant_override("separation", 10)
-	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	margin.add_child(row)
+	var stack := VBoxContainer.new()
+	stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	stack.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	stack.add_theme_constant_override("separation", 0)
+	stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	margin.add_child(stack)
+
+	var title_row := HBoxContainer.new()
+	title_row.add_theme_constant_override("separation", 9)
+	title_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	stack.add_child(title_row)
 
 	var icon_panel := PanelContainer.new()
 	icon_panel.custom_minimum_size = Vector2(52, 52)
 	icon_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	icon_panel.add_theme_stylebox_override("panel", AppDesignSystem.surface(AppDesignSystem.metric_tint(fill), Color.TRANSPARENT, 0, 26))
-	row.add_child(icon_panel)
+	var icon_fill := Color(1, 1, 1, 0.18) if featured else AppDesignSystem.metric_tint(fill)
+	icon_panel.add_theme_stylebox_override("panel", AppDesignSystem.surface(icon_fill, Color.TRANSPARENT, 0, 24, false))
+	title_row.add_child(icon_panel)
 	var icon_center := CenterContainer.new()
 	icon_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	icon_panel.add_child(icon_center)
-	var icon := _make_sidebar_icon(_dashboard_stat_icon(title_text), fill)
+	var icon := _make_sidebar_icon(_dashboard_stat_icon(title_text), Color.WHITE if featured else fill)
 	icon.custom_minimum_size = Vector2(26, 26)
 	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	icon_center.add_child(icon)
-
-	var vbox := VBoxContainer.new()
-	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vbox.add_theme_constant_override("separation", 1)
-	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(vbox)
 
 	var title := Label.new()
 	title.text = title_text
 	title.add_theme_font_override("font", UI_FONT)
 	title.add_theme_font_size_override("font_size", 13)
-	title.add_theme_color_override("font_color", AppDesignSystem.MUTED)
+	title.add_theme_color_override("font_color", Color.WHITE if featured else AppDesignSystem.NAVY)
 	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(title)
+	title_row.add_child(title)
+	if featured:
+		var info := Label.new()
+		info.text = "ⓘ"
+		info.add_theme_font_size_override("font_size", 14)
+		info.add_theme_color_override("font_color", Color(1, 1, 1, 0.75))
+		info.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		title_row.add_child(info)
 
 	var value := Label.new()
 	value.text = value_text
 	value.add_theme_font_override("font", UI_FONT)
-	value.add_theme_font_size_override("font_size", 27)
-	value.add_theme_color_override("font_color", AppDesignSystem.TEXT)
+	value.add_theme_font_size_override("font_size", 34 if featured else 29)
+	value.add_theme_color_override("font_color", Color.WHITE if featured else AppDesignSystem.NAVY)
 	value.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(value)
+	stack.add_child(value)
 
 	var hint := Label.new()
 	hint.text = hint_text
 	hint.clip_text = true
 	hint.add_theme_font_size_override("font_size", 12)
-	hint.add_theme_color_override("font_color", AppDesignSystem.MUTED)
+	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.86) if featured else AppDesignSystem.MUTED)
 	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(hint)
+	stack.add_child(hint)
 
-	var trend_stack := VBoxContainer.new()
-	trend_stack.alignment = BoxContainer.ALIGNMENT_CENTER
-	trend_stack.custom_minimum_size = Vector2(88, 0)
-	trend_stack.size_flags_horizontal = Control.SIZE_SHRINK_END
-	trend_stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(trend_stack)
+	var spacer := Control.new()
+	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	stack.add_child(spacer)
+	var rule := HSeparator.new()
+	rule.add_theme_color_override("separator_color", Color(1, 1, 1, 0.22) if featured else Color("#e5edf4"))
+	stack.add_child(rule)
+	var trend_row := HBoxContainer.new()
+	trend_row.custom_minimum_size = Vector2(0, 38)
+	trend_row.alignment = BoxContainer.ALIGNMENT_BEGIN
+	trend_row.add_theme_constant_override("separation", 5)
+	trend_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	stack.add_child(trend_row)
 	var trend_label := Label.new()
-	trend_label.text = str(trend.get("text", "Atualizado agora"))
-	trend_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	var trend_text := str(trend.get("text", "Atualizado agora"))
+	trend_label.text = trend_text if trend_text.begins_with("↑") or trend_text.begins_with("↓") or trend_text.begins_with("—") else "— 0,0%"
 	trend_label.add_theme_font_override("font", UI_FONT)
 	trend_label.add_theme_font_size_override("font_size", 12)
-	trend_label.add_theme_color_override("font_color", trend.get("color", MUTED))
+	trend_label.add_theme_color_override("font_color", GREEN if featured else trend.get("color", GREEN))
 	trend_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	trend_stack.add_child(trend_label)
+	trend_row.add_child(trend_label)
 	var trend_hint := Label.new()
-	trend_hint.text = "vs ontem" if bool(trend.get("has_comparison", false)) else "status atual"
-	trend_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	trend_hint.text = "vs ontem"
 	trend_hint.add_theme_font_size_override("font_size", 10)
-	trend_hint.add_theme_color_override("font_color", MUTED)
+	trend_hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.8) if featured else MUTED)
 	trend_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	trend_stack.add_child(trend_hint)
+	trend_row.add_child(trend_hint)
 
 	return panel
 
@@ -45549,11 +44503,11 @@ func _dashboard_stat_icon(title_text: String) -> String:
 	match title_text:
 		"Em estoque", "Equipamentos":
 			return "cadastros"
-		"Reserva":
+		"Reserva", "Em reserva":
 			return "arquivo"
 		"Instalados":
 			return "localizacao"
-		"Manutencoes":
+		"Manutencoes", "Em manutenção":
 			return "manutencoes"
 		"Inativos":
 			return "log"
@@ -45910,20 +44864,6 @@ func _make_action_button(text_value: String, fill: Color, border: Color, font_co
 	button.add_theme_stylebox_override("hover", _style_box(_button_hover_fill(normal_fill), normal_border, 1, 8))
 	button.add_theme_stylebox_override("pressed", _style_box(_button_pressed_fill(normal_fill), normal_border.darkened(0.08), 1, 8))
 	button.add_theme_stylebox_override("focus", _style_box(_button_hover_fill(normal_fill), BLUE, 1, 8))
-	return button
-
-
-func _make_compact_inventory_toolbar_button(text_value: String, fill: Color, border: Color, font_color: Color, min_size: Vector2, callback: Callable) -> Button:
-	# Barra de estoque compacta: mesma identidade visual, mais espaço para a tabela.
-	var button := _make_action_button(text_value, fill, border, font_color, min_size, callback)
-	button.add_theme_font_size_override("font_size", 12)
-	button.add_theme_constant_override("icon_max_width", 18)
-	button.add_theme_constant_override("h_separation", 5)
-	button.add_theme_constant_override("outline_size", 0)
-	button.add_theme_stylebox_override("normal", _style_box(fill, border, 1, 7))
-	button.add_theme_stylebox_override("hover", _style_box(_button_hover_fill(fill), border, 1, 7))
-	button.add_theme_stylebox_override("pressed", _style_box(_button_pressed_fill(fill), border.darkened(0.08), 1, 7))
-	button.add_theme_stylebox_override("focus", _style_box(_button_hover_fill(fill), BLUE, 1, 7))
 	return button
 
 
