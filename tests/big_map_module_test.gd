@@ -48,6 +48,14 @@ func _test_tile_provider() -> void:
 	_check(url.ends_with("/13/4210/3015"), "World Imagery recebeu x/y na ordem errada.")
 	_check(TileProvider.cache_key(13, 3015, 4210).begins_with(Config.TILE_PROVIDER_ID), "Cache não inclui o provedor.")
 	_check(TileProvider.attribution().strip_edges() != "", "Atribuição do mapa está vazia.")
+	var jpeg_image := Image.create(2, 2, false, Image.FORMAT_RGB8)
+	jpeg_image.fill(Color("#1976b8"))
+	var jpeg_bytes := jpeg_image.save_jpg_to_buffer(0.85)
+	var jpeg_texture := TileProvider.texture_from_bytes(jpeg_bytes)
+	_check(jpeg_texture != null, "Tile JPEG do provedor não foi decodificado.")
+	if jpeg_texture != null:
+		jpeg_texture = null
+	jpeg_image = null
 
 
 func _test_vehicle_status() -> void:

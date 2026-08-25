@@ -997,6 +997,8 @@ var sidebar_panel: Control
 var content_area: MarginContainer
 var topbar_title_label: Label
 var topbar_subtitle_label: Label
+var topbar_context_label: Label
+var topbar_menu_button: Button
 var remote_queue_layer: CanvasLayer
 var remote_queue_panel: PanelContainer
 var remote_queue_body: VBoxContainer
@@ -1632,6 +1634,8 @@ func _clear_screen() -> void:
 	sidebar_panel = null
 	topbar_title_label = null
 	topbar_subtitle_label = null
+	topbar_context_label = null
+	topbar_menu_button = null
 	sidebar_branch_name_label = null
 	sidebar_branch_status_label = null
 	sidebar_buttons.clear()
@@ -3557,9 +3561,6 @@ func _make_sidebar_equipment_group() -> Control:
 		_make_sidebar_button("Estoque", "cadastros", "inventory", _show_list, true)
 	)
 	sidebar_equipment_children.add_child(
-		_make_sidebar_button("Localização", "localizacao", "tracking", _show_vehicle_location_monitor, true)
-	)
-	sidebar_equipment_children.add_child(
 		_make_sidebar_button("Cadastro em massa", "arquivo", "bulk", _show_bulk_registration, true)
 	)
 	children_margin.add_child(children_wrap)
@@ -3791,11 +3792,20 @@ func _set_page_context(section: String, title: String, subtitle: String = "") ->
 	if is_instance_valid(topbar_title_label):
 		topbar_title_label.text = title
 	if is_instance_valid(topbar_subtitle_label):
-		topbar_subtitle_label.text = "Início  ›  %s" % title
+		topbar_subtitle_label.text = "Início  ›  Equipamentos  ›  Estoque" if section == "inventory" else "Início  ›  %s" % title
+	if is_instance_valid(topbar_context_label):
+		topbar_context_label.text = subtitle
+		topbar_context_label.visible = section == "inventory" and subtitle.strip_edges() != ""
+	if is_instance_valid(topbar_menu_button):
+		topbar_menu_button.visible = section != "inventory"
 	for section_key in sidebar_buttons:
 		var button: Button = sidebar_buttons[section_key]
 		if is_instance_valid(button):
 			var active := str(section_key) == section
+			# A tela combinada usa o estado interno de Localização para manter
+			# a atualização dos veículos, mas é aberta pelo item Mapa Grande.
+			if section == "vehicle_location" and str(section_key) == "monitor_4g":
+				active = true
 			if str(section_key) == "equipment_group":
 				active = _is_sidebar_equipment_section(section)
 			_apply_sidebar_button_state(button, active)
@@ -3855,7 +3865,8 @@ func _sidebar_icon_path(icon_kind: String) -> String:
 	return ""
 
 func _make_system_menu_button() -> Control:
-	var menu_button := Button.new()
+	topbar_menu_button = Button.new()
+	var menu_button := topbar_menu_button
 	menu_button.toggle_mode = true
 	menu_button.text = ""
 	menu_button.custom_minimum_size = Vector2(172, 48)
@@ -4112,6 +4123,15 @@ func _build_topbar() -> Control:
 	topbar_title_label.add_theme_font_size_override("font_size", 22)
 	topbar_title_label.add_theme_color_override("font_color", AppDesignSystem.TEXT)
 	left_slot.add_child(topbar_title_label)
+
+	topbar_context_label = Label.new()
+	topbar_context_label.text = ""
+	topbar_context_label.visible = false
+	topbar_context_label.clip_text = true
+	topbar_context_label.add_theme_font_override("font", UI_FONT)
+	topbar_context_label.add_theme_font_size_override("font_size", 12)
+	topbar_context_label.add_theme_color_override("font_color", AppDesignSystem.MUTED)
+	left_slot.add_child(topbar_context_label)
 
 	topbar_subtitle_label = Label.new()
 	topbar_subtitle_label.text = "Início  ›  Dashboard inicial"
@@ -8895,8 +8915,8 @@ func _show_list() -> void:
 	# Ao voltar para a lista, a proxima edicao deve partir de um formulario limpo.
 	# A sincronizacao remota usa uma copia dos dados capturados antes desta tela.
 	editing_sku = ""
-	_set_page_context("inventory", "Estoque de equipamentos", "Cadastro, disponibilidade e situacao dos rastreadores")
-	_set_content_margins(28, 30, 28, 24)
+	_set_page_context("inventory", "Estoque de equipamentos", "Cadastro, disponibilidade e situação dos rastreadores")
+	_set_content_margins(22, 16, 22, 14)
 	_set_content(_build_list_view())
 	_refresh_table()
 
@@ -14498,6 +14518,95 @@ func _capture_dashboard_trends(stats: Dictionary) -> Dictionary:
 	return trends
 
 
+func _inventory_summary_stats() -> Dictionary:
+	var stock_module := _app_module("stock")
+	if stock_module != null:
+		return stock_module.call("get_summary", store)
+	return store.get_tracker_stats() if store != null else {}
+
+
+func _format_inventory_count(value: int) -> String:
+	var raw := str(absi(value))
+	var grouped := ""
+	while raw.length() > 3:
+		grouped = "." + raw.substr(raw.length() - 3) + grouped
+		raw = raw.substr(0, raw.length() - 3)
+	grouped = raw + grouped
+	return ("-" if value < 0 else "") + grouped
+
+
+func _build_inventory_summary_strip(stats: Dictionary) -> Control:
+	var panel := PanelContainer.new()
+	panel.name = "InventorySummaryStrip"
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.custom_minimum_size = Vector2(0, 74)
+	panel.add_theme_stylebox_override("panel", _style_box(Color.WHITE, Color("#e2eaf3"), 1, 9, true))
+
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 14)
+	margin.add_theme_constant_override("margin_right", 14)
+	margin.add_theme_constant_override("margin_top", 10)
+	margin.add_theme_constant_override("margin_bottom", 10)
+	panel.add_child(margin)
+
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_theme_constant_override("separation", 0)
+	margin.add_child(row)
+	var definitions := [
+		{"title": "Disponíveis", "key": "available", "icon": "estoque.svg", "color": BLUE},
+		{"title": "Em reserva", "key": "reserved", "icon": "estoque.svg", "color": ORANGE},
+		{"title": "Instalados", "key": "installed", "icon": "confirmar.svg", "color": GREEN},
+		{"title": "Com problema", "key": "problem", "icon": "alerts/error.svg", "color": RED},
+	]
+	for index in range(definitions.size()):
+		var definition: Dictionary = definitions[index]
+		if index > 0:
+			var divider := VSeparator.new()
+			divider.custom_minimum_size = Vector2(1, 38)
+			divider.add_theme_color_override("separator", Color("#d5e0eb"))
+			row.add_child(divider)
+		var item := HBoxContainer.new()
+		item.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		item.alignment = BoxContainer.ALIGNMENT_CENTER
+		item.add_theme_constant_override("separation", 10)
+		row.add_child(item)
+		var icon_box := PanelContainer.new()
+		icon_box.custom_minimum_size = Vector2(42, 42)
+		var color: Color = definition["color"]
+		icon_box.add_theme_stylebox_override("panel", _style_box(Color(color, 0.10), Color(color, 0.0), 0, 22))
+		var icon_center := CenterContainer.new()
+		icon_box.add_child(icon_center)
+		var icon_path := ICON_DIR + str(definition["icon"])
+		var icon := TextureRect.new()
+		icon.texture = load(icon_path)
+		icon.custom_minimum_size = Vector2(21, 21)
+		icon.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+		icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon.modulate = color
+		icon_center.add_child(icon)
+		item.add_child(icon_box)
+		var text_stack := VBoxContainer.new()
+		text_stack.add_theme_constant_override("separation", 1)
+		item.add_child(text_stack)
+		var title_label := Label.new()
+		title_label.text = str(definition["title"])
+		title_label.add_theme_font_override("font", UI_FONT)
+		title_label.add_theme_font_size_override("font_size", 12)
+		title_label.add_theme_color_override("font_color", MUTED)
+		text_stack.add_child(title_label)
+		var value_label := Label.new()
+		var value := int(stats.get(str(definition["key"]), 0))
+		if definition["key"] == "problem":
+			value = int(stats.get("inactive", 0)) + int(stats.get("maintenance", 0))
+		value_label.text = _format_inventory_count(value)
+		value_label.add_theme_font_override("font", UI_FONT)
+		value_label.add_theme_font_size_override("font_size", 22)
+		value_label.add_theme_color_override("font_color", TEXT)
+		text_stack.add_child(value_label)
+	return panel
+
+
 func _build_list_view() -> Control:
 	table_row_nodes.clear()
 	table_row_signatures.clear()
@@ -14507,12 +14616,34 @@ func _build_list_view() -> Control:
 	root.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	root.add_theme_constant_override("separation", 12)
 
+	var title_row := HBoxContainer.new()
+	title_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title_row.alignment = BoxContainer.ALIGNMENT_BEGIN
+	title_row.add_theme_constant_override("separation", 12)
+	root.add_child(title_row)
+
 	var title := Label.new()
 	title.text = "Equipamentos"
 	title.add_theme_font_override("font", UI_FONT)
-	title.add_theme_font_size_override("font_size", 29)
+	title.add_theme_font_size_override("font_size", 27)
 	title.add_theme_color_override("font_color", TEXT)
-	root.add_child(title)
+	title_row.add_child(title)
+
+	var count_pill := Label.new()
+	count_pill.text = "%s equipamentos" % _format_inventory_count(int(_inventory_summary_stats().get("total", 0)))
+	count_pill.custom_minimum_size = Vector2(0, 30)
+	count_pill.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	count_pill.add_theme_font_override("font", UI_FONT)
+	count_pill.add_theme_font_size_override("font_size", 13)
+	count_pill.add_theme_color_override("font_color", BLUE_DARK)
+	count_pill.add_theme_stylebox_override("normal", _style_box(Color("#f2f6fa"), Color("#dbe5ef"), 1, 16))
+	var count_margin := MarginContainer.new()
+	count_margin.add_theme_constant_override("margin_left", 12)
+	count_margin.add_theme_constant_override("margin_right", 12)
+	count_margin.add_theme_constant_override("margin_top", 1)
+	count_margin.add_theme_constant_override("margin_bottom", 1)
+	count_margin.add_child(count_pill)
+	title_row.add_child(count_margin)
 
 	var controls_panel := PanelContainer.new()
 	controls_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -14541,7 +14672,7 @@ func _build_list_view() -> Control:
 
 	search_input = LineEdit.new()
 	search_input.placeholder_text = "Buscar por placa, série, telefone, chip ou operadora"
-	search_input.custom_minimum_size = Vector2(320, 40)
+	search_input.custom_minimum_size = Vector2(280, 36)
 	search_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	search_input.right_icon = load(ICON_DIR + "pesquisar.svg")
 
@@ -14562,11 +14693,11 @@ func _build_list_view() -> Control:
 	)
 
 	toolbar.add_child(search_input)
-	toolbar.add_child(_make_action_button("Limpar", Color("#eef3f8"), BORDER, BLUE_DARK, Vector2(98, 40), _clear_search))
+	toolbar.add_child(_make_action_button("Limpar", Color.WHITE, BORDER, BLUE_DARK, Vector2(78, 36), _clear_search))
 
 	search_busy_label = Label.new()
 	search_busy_label.text = ""
-	search_busy_label.custom_minimum_size = Vector2(78, 40)
+	search_busy_label.custom_minimum_size = Vector2(66, 36)
 	search_busy_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	search_busy_label.add_theme_font_override("font", UI_FONT)
 	search_busy_label.add_theme_font_size_override("font_size", 16)
@@ -14579,7 +14710,7 @@ func _build_list_view() -> Control:
 	search_busy_timer.timeout.connect(_animate_search_busy)
 	search_input.add_child(search_busy_timer)
 
-	toolbar.add_child(_make_action_button("Exportar XLSX", GREEN, GREEN, Color.WHITE, Vector2(145, 40), _request_export_all_registrations_xlsx))
+	toolbar.add_child(_make_action_button("Exportar XLSX", GREEN, GREEN, Color.WHITE, Vector2(126, 36), _request_export_all_registrations_xlsx))
 
 	if not _is_regional_branch():
 		inventory_reset_button = _make_action_button(
@@ -14587,7 +14718,7 @@ func _build_list_view() -> Control:
 			Color("#eef3f8"),
 			BORDER,
 			BLUE_DARK,
-			Vector2(136, 40),
+			Vector2(110, 36),
 			_on_inventory_reconnect_pressed
 		)
 		inventory_reset_button.icon = load(ICON_DIR + "atualizar.svg")
@@ -14600,7 +14731,7 @@ func _build_list_view() -> Control:
 			BLUE,
 			BLUE,
 			Color.WHITE,
-			Vector2(160, 40),
+			Vector2(140, 36),
 			_show_appliance_replacement_modal
 		)
 		replacement_button.icon = load(ICON_DIR + "atualizar.svg")
@@ -14609,32 +14740,39 @@ func _build_list_view() -> Control:
 		toolbar.add_child(replacement_button)
 
 	status_quick_filters = _build_status_quick_filters()
-	controls_stack.add_child(status_quick_filters)
+	var filter_and_period_row := HBoxContainer.new()
+	filter_and_period_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	filter_and_period_row.add_theme_constant_override("separation", 12)
+	controls_stack.add_child(filter_and_period_row)
+	filter_and_period_row.add_child(status_quick_filters)
 	_sync_status_quick_filters()
 
 	var inventory_period_row := HBoxContainer.new()
 	inventory_period_row.name = "InventoryDateRange"
 	inventory_period_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	inventory_period_row.size_flags_stretch_ratio = 0.62
 	inventory_period_row.add_theme_constant_override("separation", 8)
-	controls_stack.add_child(inventory_period_row)
+	filter_and_period_row.add_child(inventory_period_row)
 	inventory_date_input = LineEdit.new()
 	inventory_date_input.placeholder_text = "Data inicial"
 	inventory_date_input.text = _system_log_calendar_display_value(inventory_start_date)
-	inventory_date_input.custom_minimum_size = Vector2(0, 34)
-	_style_line_edit(inventory_date_input)
+	inventory_date_input.custom_minimum_size = Vector2(0, 30)
+	_style_inventory_date_input(inventory_date_input)
 	inventory_date_input.text_submitted.connect(func(_text): _apply_inventory_date_filters())
 	inventory_period_row.add_child(_make_log_filter_group("Período inicial", _make_system_log_date_picker(inventory_date_input, false), 0, true))
 	inventory_end_date_input = LineEdit.new()
 	inventory_end_date_input.placeholder_text = "Data final"
 	inventory_end_date_input.text = _system_log_calendar_display_value(inventory_end_date)
-	inventory_end_date_input.custom_minimum_size = Vector2(0, 34)
-	_style_line_edit(inventory_end_date_input)
+	inventory_end_date_input.custom_minimum_size = Vector2(0, 30)
+	_style_inventory_date_input(inventory_end_date_input)
 	inventory_end_date_input.text_submitted.connect(func(_text): _apply_inventory_date_filters())
 	inventory_period_row.add_child(_make_log_filter_group("Período final", _make_system_log_date_picker(inventory_end_date_input, true), 0, true))
-	var apply_inventory_period := _make_action_button("Aplicar", BLUE, BLUE, Color.WHITE, Vector2(86, 34), _apply_inventory_date_filters)
+	var apply_inventory_period := _make_action_button("Aplicar", BLUE, BLUE, Color.WHITE, Vector2(58, 30), _apply_inventory_date_filters)
+	apply_inventory_period.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	apply_inventory_period.tooltip_text = "Filtrar os equipamentos pelo período informado"
 	inventory_period_row.add_child(apply_inventory_period)
-	var clear_inventory_period := _make_action_button("Limpar período", Color("#eef3f8"), BORDER, BLUE_DARK, Vector2(118, 34), _clear_inventory_date_filters)
+	var clear_inventory_period := _make_action_button("Limpar período", Color.WHITE, BORDER, BLUE_DARK, Vector2(92, 30), _clear_inventory_date_filters)
+	clear_inventory_period.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	clear_inventory_period.tooltip_text = "Remover o filtro de período"
 	inventory_period_row.add_child(clear_inventory_period)
 
@@ -14654,6 +14792,8 @@ func _build_list_view() -> Control:
 	table_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	table_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	table_panel.add_theme_stylebox_override("panel", _style_box(Color.WHITE, Color("#e4edf7"), 1, 10, true))
+	var summary_strip := _build_inventory_summary_strip(_inventory_summary_stats())
+	root.add_child(summary_strip)
 	root.add_child(table_panel)
 
 	var table_margin := MarginContainer.new()
@@ -16127,7 +16267,6 @@ func _make_online_lookup_row(product: Dictionary) -> Control:
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row_stack.add_child(row)
-
 	row.add_child(_make_copyable_table_cell(str(product.get("serial", "")), 130, false, Color.BLACK, HORIZONTAL_ALIGNMENT_CENTER, 15))
 	row.add_child(_make_copyable_table_cell(_blank(str(product.get("plate", ""))), 130, false, Color.BLACK, HORIZONTAL_ALIGNMENT_CENTER, 15))
 	row.add_child(_make_copyable_table_cell(_blank(str(product.get("client", ""))), 270, true, Color.BLACK, HORIZONTAL_ALIGNMENT_CENTER, 15))
@@ -26308,19 +26447,16 @@ func _build_system_log_reference_filters() -> Control:
 
 
 func _make_system_log_date_picker(input: LineEdit, end_of_day: bool) -> Control:
-	var row := HBoxContainer.new()
-	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_theme_constant_override("separation", 4)
 	input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(input)
-	var calendar_button := _make_icon_action_button(ICON_DIR + "calendario.svg", Color("#e8f2fb"), Color("#c6dbea"), Vector2(42, 36), func():
-		_open_system_log_calendar(input, end_of_day)
+	input.right_icon = load(ICON_DIR + "calendario_azul.svg")
+	input.tooltip_text = "Escolher data no calendario"
+	input.gui_input.connect(func(event: InputEvent):
+		var mouse_event := event as InputEventMouseButton
+		if mouse_event != null and mouse_event.button_index == MOUSE_BUTTON_LEFT and mouse_event.pressed:
+			if mouse_event.position.x >= input.size.x - 34.0:
+				_open_system_log_calendar(input, end_of_day)
 	)
-	calendar_button.add_theme_color_override("icon_normal_color", BLUE)
-	calendar_button.add_theme_color_override("icon_hover_color", BLUE_DARK)
-	calendar_button.tooltip_text = "Escolher data no calendario"
-	row.add_child(calendar_button)
-	return row
+	return input
 
 
 func _system_log_calendar_month_name(month: int) -> String:
@@ -34339,19 +34475,25 @@ func _build_table_header() -> Control:
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	panel.add_child(row)
 
-	row.add_child(_make_table_label("Numero Serie", 150, false, MUTED, HORIZONTAL_ALIGNMENT_CENTER, 15))
-	row.add_child(_make_table_label("Placa", 145, false, MUTED, HORIZONTAL_ALIGNMENT_CENTER, 15))
+	if not _is_regional_branch():
+		var select_header := CheckBox.new()
+		select_header.custom_minimum_size = Vector2(38, 0)
+		select_header.disabled = true
+		select_header.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		row.add_child(select_header)
+
+	row.add_child(_make_table_label("Série  ↕", 150, false, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 13))
+	row.add_child(_make_table_label("Placa  ↕", 145, false, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 13))
 	row.add_child(_make_table_label("Tipo", 140, false, MUTED, HORIZONTAL_ALIGNMENT_CENTER, 15))
-	row.add_child(_make_table_label("Operadora", 120, false, MUTED, HORIZONTAL_ALIGNMENT_CENTER, 15))
-	row.add_child(_make_table_label("Status", 120, false, MUTED, HORIZONTAL_ALIGNMENT_CENTER, 15))
+	row.add_child(_make_table_label("Operadora  ↕", 120, false, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 13))
+	row.add_child(_make_table_label("Status  ↕", 120, false, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 13))
 	if _is_regional_branch():
 		row.add_child(_make_table_label("Data", 115, false, MUTED, HORIZONTAL_ALIGNMENT_CENTER, 15))
 		row.add_child(_make_table_label("Acoes", 300, true, MUTED, HORIZONTAL_ALIGNMENT_CENTER, 15))
 	else:
-		row.add_child(_make_table_label("Chip", 105, false, MUTED, HORIZONTAL_ALIGNMENT_CENTER, 15))
-		row.add_child(_make_table_label("Data", 115, false, MUTED, HORIZONTAL_ALIGNMENT_CENTER, 15))
-		row.add_child(_make_table_label("Placa", 135, false, MUTED, HORIZONTAL_ALIGNMENT_CENTER, 15))
-		row.add_child(_make_table_label("Acoes", 382, true, MUTED, HORIZONTAL_ALIGNMENT_CENTER, 15))
+		row.add_child(_make_table_label("Conectividade  ↕", 105, false, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 13))
+		row.add_child(_make_table_label("Instalação  ↕", 115, false, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 13))
+		row.add_child(_make_table_label("Ações", 320, true, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 13))
 
 	return panel
 
@@ -34682,25 +34824,46 @@ func _build_status_quick_filters() -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.alignment = BoxContainer.ALIGNMENT_BEGIN
-	row.add_theme_constant_override("separation", 8)
+	row.add_theme_constant_override("separation", 6)
 
-	var statuses := ["Todos", "Estoque", "Instalado", "Parado"] if _is_regional_branch() else ["Todos", "Estoque", "Reserva", "Instalado", "Manutencao", "Inativo"]
+	var stats := _inventory_summary_stats()
+	var statuses := ["Todos", "Estoque", "Instalado", "Parado"] if _is_regional_branch() else ["Todos", "Estoque", "Reserva", "Instalado", "Manutenção", "Inativos"]
 	for status in statuses:
-		var key := "all" if status == "Todos" else _status_key_from_text(status)
-		var button := _make_status_filter_button(status, key)
+		var key := "all" if status == "Todos" else ("manutencao" if status == "Manutenção" else ("inativo" if status == "Inativos" else _status_key_from_text(status)))
+		var count := int(stats.get("total", 0)) if key == "all" else _inventory_status_count(stats, key)
+		var button := _make_status_filter_button("%s  %s" % [status, _format_inventory_count(count)], key)
 		row.add_child(button)
 
 	_sync_status_quick_filters()
 	return row
 
 
+func _inventory_status_count(stats: Dictionary, status_key: String) -> int:
+	match status_key:
+		"estoque":
+			return int(stats.get("available", 0))
+		"reserva":
+			return int(stats.get("reserved", 0))
+		"instalado":
+			return int(stats.get("installed", 0))
+		"manutencao":
+			return int(stats.get("maintenance", 0))
+		"inativo":
+			return int(stats.get("inactive", 0))
+		"parado":
+			return int(stats.get("stopped", 0))
+	return 0
+
+
 func _make_status_filter_button(text_value: String, status_key: String) -> Button:
 	var button := Button.new()
 	button.text = text_value
 	button.set_meta("status_key", status_key)
-	button.custom_minimum_size = Vector2(108, 34)
+	button.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	button.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	button.custom_minimum_size = Vector2(maxf(48.0, float(text_value.length()) * 4.8 + 14.0), 28)
 	button.add_theme_font_override("font", UI_FONT)
-	button.add_theme_font_size_override("font_size", 15)
+	button.add_theme_font_size_override("font_size", 10)
 	button.pressed.connect(func():
 		_select_status_filter(status_key)
 	)
@@ -34774,15 +34937,15 @@ func _date_value_in_range(raw_value: String, start_value: String, end_value: Str
 
 
 func _style_status_filter_button(button: Button, active: bool) -> void:
-	var fill := BLUE if active else BUTTON_LIGHT_BLUE
-	var border := BLUE if active else BUTTON_LIGHT_BLUE_BORDER
+	var fill := BLUE if active else Color("#ffffff")
+	var border := BLUE if active else Color("#d9e3ec")
 	var font_color := Color.WHITE if active else BLUE_DARK
 	button.add_theme_color_override("font_color", font_color)
 	button.add_theme_color_override("font_hover_color", font_color)
 	button.add_theme_color_override("font_pressed_color", font_color)
 	button.add_theme_stylebox_override("normal", _style_box(fill, border, 1, 7))
-	button.add_theme_stylebox_override("hover", _style_box(fill.lightened(0.05), BLUE, 1, 7))
-	button.add_theme_stylebox_override("pressed", _style_box(fill.darkened(0.05), BLUE, 1, 7))
+	button.add_theme_stylebox_override("hover", _style_box(Color("#f5f9fc") if not active else fill.lightened(0.05), BLUE, 1, 7))
+	button.add_theme_stylebox_override("pressed", _style_box(Color("#edf4f9") if not active else fill.darkened(0.05), BLUE, 1, 7))
 
 
 func _filtered_products() -> Array[Dictionary]:
@@ -35031,6 +35194,12 @@ func _make_table_row(product: Dictionary) -> Control:
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row_stack.add_child(row)
+	if not _is_regional_branch():
+		var row_select := CheckBox.new()
+		row_select.custom_minimum_size = Vector2(38, 0)
+		row_select.disabled = true
+		row_select.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		row.add_child(row_select)
 
 	if _is_regional_branch():
 		row.add_child(
@@ -35124,16 +35293,34 @@ func _make_table_row(product: Dictionary) -> Control:
 
 	row.add_child(_make_serial_location_cell(product, sku))
 
-	row.add_child(
-		_make_copyable_table_cell(
-			_blank(str(product.get("plate", ""))),
-			145,
-			false,
-			Color.BLACK,
-			HORIZONTAL_ALIGNMENT_CENTER,
-			18
+	var plate_input: LineEdit = null
+	if installed:
+		row.add_child(
+			_make_copyable_table_cell(
+				_blank(str(product.get("plate", ""))),
+				145,
+				false,
+				Color.BLACK,
+				HORIZONTAL_ALIGNMENT_LEFT,
+				15
+			)
 		)
-	)
+	else:
+		var plate_wrap := CenterContainer.new()
+		plate_wrap.custom_minimum_size = Vector2(145, 0)
+		row.add_child(plate_wrap)
+		plate_input = LineEdit.new()
+		plate_input.placeholder_text = "Placa"
+		plate_input.text = str(table_plate_drafts.get(sku, product.get("plate", "")))
+		plate_input.custom_minimum_size = Vector2(135, 34)
+		plate_input.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		_style_line_edit(plate_input)
+		plate_input.text_changed.connect(_format_plate_input.bind(plate_input))
+		plate_input.text_changed.connect(func(_value: String):
+			table_plate_drafts[sku] = plate_input.text
+		)
+		plate_wrap.add_child(plate_input)
+		row_panel.set_meta("plate_input", plate_input)
 
 	row.add_child(
 		_make_copyable_table_cell(
@@ -35180,56 +35367,22 @@ func _make_table_row(product: Dictionary) -> Control:
 		)
 	)
 
-	var plate_input: LineEdit = null
-
-	if installed:
-		row.add_child(
-			_make_copyable_table_cell(
-				_blank(str(product.get("plate", ""))),
-				135,
-				false,
-				Color.BLACK,
-				HORIZONTAL_ALIGNMENT_CENTER,
-				18
-			)
-		)
-	else:
-		var plate_input_wrap := CenterContainer.new()
-		plate_input_wrap.custom_minimum_size = Vector2(135, 0)
-		row.add_child(plate_input_wrap)
-
-		plate_input = LineEdit.new()
-		plate_input.placeholder_text = "Placa"
-		plate_input.text = str(table_plate_drafts.get(sku, product.get("plate", "")))
-		plate_input.custom_minimum_size = Vector2(135, 38)
-		plate_input.alignment = HORIZONTAL_ALIGNMENT_CENTER
-		_style_line_edit(plate_input)
-		plate_input.text_changed.connect(_format_plate_input.bind(plate_input))
-		plate_input.text_changed.connect(func(_value: String):
-			table_plate_drafts[sku] = plate_input.text
-		)
-		plate_input_wrap.add_child(plate_input)
-		row_panel.set_meta("plate_input", plate_input)
-
 	var actions := HBoxContainer.new()
-	actions.custom_minimum_size = Vector2(382, 0)
+	actions.custom_minimum_size = Vector2(320, 0)
 	actions.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	actions.alignment = BoxContainer.ALIGNMENT_CENTER
 	actions.add_theme_constant_override("separation", 7)
 	row.add_child(actions)
 
 	# Editar
-	var btn_editar := _make_action_button(
-		"Editar",
-		Color("#0b6fae"),
-		Color("#0b6fae"),
-		Color.WHITE,
-		Vector2(82, 38),
+	var btn_editar := _make_icon_action_button(
+		ICON_DIR + "editar.svg",
+		Color("#f8fbfe"),
+		Color("#c9d9e8"),
+		Vector2(42, 34),
 		_show_form.bind(sku)
 	)
-
-	btn_editar.icon = load(ICON_DIR + "editar.svg")
-	btn_editar.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	btn_editar.tooltip_text = "Editar equipamento"
 
 	actions.add_child(btn_editar)
 
@@ -35238,7 +35391,7 @@ func _make_table_row(product: Dictionary) -> Control:
 		ICON_DIR + "mensagem.svg",
 		Color("#0b6fae"),
 		Color("#0b6fae"),
-		Vector2(42, 38),
+		Vector2(34, 34),
 		func(): _show_arya_sms_dialog(product)
 	)
 	btn_sms.tooltip_text = "Enviar comando pela fila SMS Manual do Grupo RS"
@@ -35249,7 +35402,7 @@ func _make_table_row(product: Dictionary) -> Control:
 		ICON_DIR + "deletar.svg",
 		Color("#b64747"),
 		Color("#b64747"),
-		Vector2(42, 38),
+		Vector2(34, 34),
 		func(): _request_delete(sku)
 	)
 	btn_deletar.tooltip_text = "Excluir equipamento"
@@ -35261,7 +35414,7 @@ func _make_table_row(product: Dictionary) -> Control:
 			Color("#5f7892"),
 			Color("#5f7892"),
 			Color.WHITE,
-			Vector2(100, 38),
+			Vector2(92, 34),
 			_install_equipment.bind(sku, plate_input)
 		)
 
@@ -35277,7 +35430,7 @@ func _make_table_row(product: Dictionary) -> Control:
 			Color("#2d8f6d"),
 			Color("#2d8f6d"),
 			Color.WHITE,
-			Vector2(82, 38),
+			Vector2(72, 34),
 			_send_to_stock.bind(sku)
 		)
 
@@ -44851,7 +45004,7 @@ func _make_action_button(text_value: String, fill: Color, border: Color, font_co
 		button.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		button.add_theme_constant_override("h_separation", 7)
 	button.add_theme_font_override("font", UI_FONT)
-	button.add_theme_font_size_override("font_size", 16 if min_size.y <= 40 else 18)
+	button.add_theme_font_size_override("font_size", 14 if min_size.y <= 40 else 16)
 	button.add_theme_color_override("font_color", normal_font)
 	button.add_theme_color_override("font_hover_color", normal_font)
 	button.add_theme_color_override("font_pressed_color", normal_font)
@@ -44889,8 +45042,8 @@ func _make_icon_action_button(icon_path: String, fill: Color, border: Color, min
 func _button_palette(fill: Color, border: Color, font_color: Color) -> Dictionary:
 	if _is_soft_button_color(fill):
 		return {
-			"fill": BUTTON_GRAY,
-			"border": BUTTON_GRAY_BORDER,
+			"fill": Color("#ffffff"),
+			"border": Color("#d7e2ec"),
 			"font": BLUE_DARK,
 		}
 	if _is_medium_gray_button_color(fill):
@@ -44976,7 +45129,7 @@ func _action_icon_path(text_value: String) -> String:
 
 
 func _make_new_equipment_button() -> Button:
-	var button := _make_action_button("", BLUE, BLUE, Color.WHITE, Vector2(178, 40), func(): _show_form(""))
+	var button := _make_action_button("", BLUE, BLUE, Color.WHITE, Vector2(152, 36), func(): _show_form(""))
 
 	var center := CenterContainer.new()
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -44998,10 +45151,10 @@ func _make_new_equipment_button() -> Button:
 	row.add_child(icon)
 
 	var label := Label.new()
-	label.text = "Novo"
+	label.text = "Novo equipamento"
 	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	label.add_theme_font_override("font", UI_FONT)
-	label.add_theme_font_size_override("font_size", 18)
+	label.add_theme_font_size_override("font_size", 13)
 	label.add_theme_color_override("font_color", Color.WHITE)
 	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(label)
@@ -45026,6 +45179,25 @@ func _make_legend(text_value: String, color: Color) -> Control:
 	row.add_child(label)
 
 	return row
+
+
+func _style_inventory_date_input(input: LineEdit) -> void:
+	input.add_theme_font_override("font", UI_FONT)
+	input.add_theme_font_size_override("font_size", 13)
+	input.add_theme_color_override("font_color", TEXT)
+	input.add_theme_color_override("font_placeholder_color", MUTED)
+	var normal := _style_box(Color.WHITE, BORDER, 1, 7)
+	normal.content_margin_left = 10
+	normal.content_margin_right = 30
+	normal.content_margin_top = 3
+	normal.content_margin_bottom = 3
+	var focus := _style_box(Color.WHITE, BLUE, 1, 7)
+	focus.content_margin_left = 10
+	focus.content_margin_right = 30
+	focus.content_margin_top = 3
+	focus.content_margin_bottom = 3
+	input.add_theme_stylebox_override("normal", normal)
+	input.add_theme_stylebox_override("focus", focus)
 
 
 func _style_line_edit(input: LineEdit) -> void:

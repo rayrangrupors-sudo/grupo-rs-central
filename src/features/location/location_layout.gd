@@ -30,12 +30,21 @@ func _setup_st310_location_poll_timer() -> void:
 
 
 func _show_vehicle_location_monitor() -> void:
-	_set_page_context("vehicle_location", "Localização", "Rastreamento dos veículos e aparelhos em tempo real")
+	_set_page_context("vehicle_location", "Mapa Grande", "ERBs Anatel e localização de veículos em tempo real")
 	_set_content_margins(28, 20, 28, 18)
 	_set_content(_build_vehicle_location_view())
 	if not vehicle_location_refreshing:
 		call_deferred("_refresh_vehicle_location_view")
 	call_deferred("_ensure_vehicle_location_map_ready")
+
+
+func _show_smart_4g_monitor() -> void:
+	# O item antigo de Mapa Grande e a antiga tela Localização agora abrem a
+	# mesma composição, com camadas de ERBs e veículos no mesmo canvas.
+	if not _branch_supports_monitor_4g():
+		_show_warning("Mapa Grande", "Este recurso esta disponivel somente para a base de Imperatriz.")
+		return
+	_show_vehicle_location_monitor()
 
 
 func _build_vehicle_location_view() -> Control:
