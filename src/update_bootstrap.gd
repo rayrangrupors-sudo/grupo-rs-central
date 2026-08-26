@@ -37,6 +37,13 @@ func _load_selected_package() -> void:
 		_state["failed"] = pending
 		_state.erase("pending")
 		_state["last_error"] = "A atualizacao %s nao confirmou a inicializacao e foi revertida." % str(pending.get("version", ""))
+		# Quando a base e apenas o bootstrap, remover o pending sem reativar o
+		# pacote anterior deixa a aplicacao sem a cena principal e produz uma
+		# janela vazia. O ultimo pacote confirmado deve voltar a ser o ativo.
+		var previous: Dictionary = _dictionary(_state.get("previous", {}))
+		if not previous.is_empty():
+			_state["active"] = previous
+			_state.erase("previous")
 		_write_state()
 		pending = {}
 
