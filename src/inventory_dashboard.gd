@@ -35463,6 +35463,10 @@ func _refresh_table() -> void:
 	_hide_search_busy()
 	var products := _filtered_products()
 	var total_count := products.size()
+	# A conectividade do chip é independente do status do rastreador: consulta
+	# automaticamente a Arya para as linhas visíveis, respeitando cache e fila.
+	if not _is_regional_branch():
+		_schedule_visible_arya_status_batch(products, 0, products.size(), total_count)
 	var existing_rows := {}
 	var disposable_nodes: Array[Node] = []
 	for child in table_body.get_children():
