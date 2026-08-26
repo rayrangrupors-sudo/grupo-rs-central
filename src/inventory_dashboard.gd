@@ -42,6 +42,7 @@ const NAV_FONT := preload("res://assets/fonts/Noto_Sans/static/NotoSans-BoldItal
 const ErrorDialog = preload("res://src/ErrorDialog.gd")
 const RemoteOperationQueueScript := preload("res://src/remote_operation_queue_current.gd")
 const ST310DecoderScript := preload("res://src/st310_decoder.gd")
+const InventoryCommunicationStatusScript := preload("res://src/inventory_communication_status.gd")
 const BigMapConfig := preload("res://src/features/big_map/big_map_config.gd")
 const BigMapProjection := preload("res://src/features/big_map/map_projection.gd")
 const BigMapRegionService := preload("res://src/features/big_map/map_region_service.gd")
@@ -106,6 +107,10 @@ const INTERNAL_BATTERY_REFRESH_SECONDS := 60.0
 const INTERNAL_BATTERY_CACHE_SECONDS := 55
 const INTERNAL_BATTERY_VISIBLE_CONCURRENCY := 2
 const INVENTORY_DEVICE_CYCLE_PAUSE_SECONDS := 60.0
+const INVENTORY_COMMUNICATION_PAGE_SIZE := 10
+const INVENTORY_COMMUNICATION_TARGET_INTERVAL_SECONDS := 1.0
+const INVENTORY_COMMUNICATION_MAX_INTERVAL_SECONDS := 30.0
+const INVENTORY_COMMUNICATION_MAX_PAGES := 200
 # Consulta um equipamento por vez para limitar a carga nas plataformas/API e
 # manter o resultado da linha atual consistente antes de seguir para a proxima.
 const INVENTORY_DEVICE_CYCLE_CONCURRENCY := 1
@@ -1315,6 +1320,20 @@ var inventory_device_cycle_pending_signature := ""
 var inventory_device_cycle_pause_seconds := INVENTORY_DEVICE_CYCLE_PAUSE_SECONDS
 var inventory_device_cycle_queue: Array[Dictionary] = []
 var inventory_device_cycle_workers := 0
+var inventory_device_cycle_page_skip := 0
+var inventory_device_cycle_page_count := 0
+var inventory_device_cycle_rows_processed := 0
+var inventory_device_cycle_effective_interval_seconds := INVENTORY_COMMUNICATION_TARGET_INTERVAL_SECONDS
+var inventory_device_cycle_in_flight_generation := -1
+var inventory_device_cycle_metrics: Dictionary = {
+	"requests": 0, "successful_requests": 0, "errors": 0, "timeouts": 0,
+	"auth_errors": 0, "rate_limits": 0, "pages": 0, "rows": 0,
+	"last_latency_ms": -1, "max_latency_ms": -1,
+}
+var inventory_communication_status_cache: Dictionary = {}
+var inventory_communication_history: Dictionary = {}
+var inventory_communication_last_updated_at := ""
+var inventory_communication_status_label: Label
 var inventory_query_scope_generation := -1
 var inventory_query_active_requests: Array[HTTPRequest] = []
 var inventory_query_http_busy := false
@@ -1837,6 +1856,10 @@ func _clear_screen() -> void:
 	vehicle_location_source = ""
 	vehicle_location_map_generation += 1
 	vehicle_location_query_generation += 1
+	inventory_communication_status_cache.clear()
+	inventory_communication_history.clear()
+	inventory_communication_last_updated_at = ""
+	inventory_communication_status_label = null
 	table_row_nodes.clear()
 	table_row_signatures.clear()
 	table_plate_drafts.clear()
@@ -2401,6 +2424,9 @@ func _select_branch(branch_id: String, from_auto_preview: bool = false) -> void:
 	location_visible_batch_id += 1
 	inventory_device_cycle_generation += 1
 	location_status_cache.clear()
+	inventory_communication_status_cache.clear()
+	inventory_communication_history.clear()
+	inventory_communication_last_updated_at = ""
 	location_status_busy.clear()
 	location_auto_queue.clear()
 	location_auto_running = 0
@@ -15116,6 +15142,16 @@ func _build_list_view() -> Control:
 	count_margin.add_child(count_pill)
 	title_row.add_child(count_margin)
 
+	inventory_communication_status_label = Label.new()
+	inventory_communication_status_label.text = "Comunicação: aguardando API oficial"
+	inventory_communication_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	inventory_communication_status_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	inventory_communication_status_label.add_theme_font_override("font", UI_FONT)
+	inventory_communication_status_label.add_theme_font_size_override("font_size", 11)
+	inventory_communication_status_label.add_theme_color_override("font_color", MUTED)
+	inventory_communication_status_label.tooltip_text = "Prioridade: comunicação vencida = amarelo; GPS anormal com servidor atualizado = roxo; desligado atualizado = vermelho; ligado atualizado = verde."
+	title_row.add_child(inventory_communication_status_label)
+
 	var controls_panel := PanelContainer.new()
 	controls_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	controls_panel.add_theme_stylebox_override("panel", _style_box(Color.WHITE, Color("#e4edf7"), 1, 10, true))
@@ -17128,6 +17164,9 @@ func _show_location_lookup(serial: String, fallback_plate: String = "", fallback
 	_set_location_progress(progress, 3, "Estimando cobertura", "Monitor 4G")
 	result["signal_forecast"] = _build_monitor_4g_signal_forecast(clean_serial, result)
 	_cache_location_status(clean_serial, result)
+	var local_product := _local_product_for_serial(clean_serial)
+	if not local_product.is_empty():
+		_update_inventory_communication_status(local_product, result)
 	_set_location_progress(progress, 3, "Localizacao pronta", str(_location_monitoring_status(result).get("label", "")))
 	await get_tree().create_timer(0.12).timeout
 	_close_location_progress(progress)
@@ -17588,6 +17627,9 @@ func _sync_inventory_visible_scope(products: Array[Dictionary]) -> void:
 		# pode continuar sendo exibida como se pertencesse ao novo contexto.
 		location_status_cache.clear()
 		location_status_busy.clear()
+		inventory_communication_status_cache.clear()
+		inventory_communication_history.clear()
+		inventory_communication_last_updated_at = ""
 		arya_status_cache.clear()
 		arya_status_busy.clear()
 		arya_resolve_cache.clear()
@@ -17692,6 +17734,10 @@ func _invalidate_visible_inventory_device_cycle() -> void:
 		inventory_device_cycle_products.clear()
 		inventory_device_cycle_queue.clear()
 		inventory_device_cycle_workers = 0
+		inventory_device_cycle_page_skip = 0
+		inventory_device_cycle_page_count = 0
+		inventory_device_cycle_rows_processed = 0
+		inventory_device_cycle_in_flight_generation = -1
 
 
 func _start_visible_inventory_device_cycle(products: Array[Dictionary], signature: String, generation: int) -> void:
@@ -17699,6 +17745,11 @@ func _start_visible_inventory_device_cycle(products: Array[Dictionary], signatur
 	inventory_device_cycle_signature = signature
 	inventory_device_cycle_queue.clear()
 	inventory_device_cycle_workers = 0
+	inventory_device_cycle_page_skip = 0
+	inventory_device_cycle_page_count = 0
+	inventory_device_cycle_rows_processed = 0
+	inventory_device_cycle_effective_interval_seconds = INVENTORY_COMMUNICATION_TARGET_INTERVAL_SECONDS
+	inventory_device_cycle_in_flight_generation = -1
 	inventory_device_cycle_running = true
 	call_deferred("_run_visible_inventory_device_cycle", generation)
 
@@ -17710,6 +17761,10 @@ func _handoff_visible_inventory_device_cycle() -> void:
 		inventory_device_cycle_products.clear()
 		inventory_device_cycle_queue.clear()
 		inventory_device_cycle_workers = 0
+		inventory_device_cycle_page_skip = 0
+		inventory_device_cycle_page_count = 0
+		inventory_device_cycle_rows_processed = 0
+		inventory_device_cycle_in_flight_generation = -1
 		return
 
 	var next_products: Array[Dictionary] = inventory_device_cycle_pending_products.duplicate(true)
@@ -17720,6 +17775,11 @@ func _handoff_visible_inventory_device_cycle() -> void:
 
 
 func _run_visible_inventory_device_cycle(generation: int) -> void:
+	if _grupo_rs_supports_modern_api() and _grupo_rs_api_reads_enabled():
+		await _run_inventory_communication_page_cycle(generation)
+		return
+
+	# Bases sem a API oficial moderna preservam o ciclo legado.
 	while inventory_device_cycle_running and is_inside_tree():
 		if generation != inventory_device_cycle_generation:
 			_handoff_visible_inventory_device_cycle()
@@ -17747,6 +17807,144 @@ func _run_visible_inventory_device_cycle(generation: int) -> void:
 
 	if not is_inside_tree():
 		inventory_device_cycle_running = false
+
+
+func _run_inventory_communication_page_cycle(generation: int) -> void:
+	while inventory_device_cycle_running and is_inside_tree():
+		if generation != inventory_device_cycle_generation:
+			_handoff_visible_inventory_device_cycle()
+			return
+		if inventory_device_cycle_page_count >= INVENTORY_COMMUNICATION_MAX_PAGES:
+			inventory_device_cycle_page_skip = 0
+			inventory_device_cycle_page_count = 0
+		var started_msec := Time.get_ticks_msec()
+		inventory_device_cycle_in_flight_generation = generation
+		var path := _grupo_rs_api_page_path("/endpoints/localizacao.php", inventory_device_cycle_page_skip, INVENTORY_COMMUNICATION_PAGE_SIZE)
+		var response := await _grupo_rs_api_get(path, true, true)
+		inventory_device_cycle_in_flight_generation = -1
+		if generation != inventory_device_cycle_generation or not inventory_device_cycle_running:
+			if generation != inventory_device_cycle_generation:
+				_handoff_visible_inventory_device_cycle()
+			return
+
+		var latency_ms: int = maxi(0, Time.get_ticks_msec() - started_msec)
+		inventory_device_cycle_metrics["requests"] = int(inventory_device_cycle_metrics.get("requests", 0)) + 1
+		inventory_device_cycle_metrics["last_latency_ms"] = latency_ms
+		inventory_device_cycle_metrics["max_latency_ms"] = max(int(inventory_device_cycle_metrics.get("max_latency_ms", -1)), latency_ms)
+		if not bool(response.get("ok", false)):
+			_inventory_communication_record_error(response)
+			inventory_device_cycle_effective_interval_seconds = min(INVENTORY_COMMUNICATION_MAX_INTERVAL_SECONDS, max(2.0, inventory_device_cycle_effective_interval_seconds * 2.0))
+			_update_inventory_communication_status_label("API oficial: aguardando nova tentativa; métricas sanitizadas atualizadas.")
+			if not await _wait_inventory_communication_interval(generation):
+				if generation != inventory_device_cycle_generation:
+					_handoff_visible_inventory_device_cycle()
+				return
+			continue
+
+		var payload: Variant = JSON.parse_string(str(response.get("body", "")))
+		if payload == null:
+			_inventory_communication_record_error({"parse_error": true})
+			inventory_device_cycle_effective_interval_seconds = min(INVENTORY_COMMUNICATION_MAX_INTERVAL_SECONDS, max(2.0, inventory_device_cycle_effective_interval_seconds * 2.0))
+			_update_inventory_communication_status_label("API oficial: resposta inválida; nova tentativa agendada.")
+			if not await _wait_inventory_communication_interval(generation):
+				if generation != inventory_device_cycle_generation:
+					_handoff_visible_inventory_device_cycle()
+				return
+			continue
+
+		var page_rows: Array[Dictionary] = []
+		for raw_row in _grupo_rs_api_extract_rows(payload):
+			page_rows.append(_grupo_rs_api_normalize_location(raw_row))
+		inventory_device_cycle_metrics["successful_requests"] = int(inventory_device_cycle_metrics.get("successful_requests", 0)) + 1
+		inventory_device_cycle_metrics["pages"] = int(inventory_device_cycle_metrics.get("pages", 0)) + 1
+		inventory_device_cycle_metrics["rows"] = int(inventory_device_cycle_metrics.get("rows", 0)) + page_rows.size()
+		inventory_device_cycle_page_count += 1
+		inventory_device_cycle_rows_processed += page_rows.size()
+		_process_inventory_communication_page(page_rows)
+		inventory_device_cycle_effective_interval_seconds = _inventory_communication_next_interval(latency_ms)
+		var page_state := _inventory_communication_page_state(payload, inventory_device_cycle_page_skip, page_rows.size())
+		if bool(page_state.get("has_more", false)):
+			inventory_device_cycle_page_skip = int(page_state.get("next_skip", inventory_device_cycle_page_skip + INVENTORY_COMMUNICATION_PAGE_SIZE))
+		else:
+			inventory_device_cycle_page_skip = 0
+			inventory_device_cycle_page_count = 0
+		_update_inventory_communication_status_label("API oficial: %d linha(s) processada(s), página %d, última atualização %s | latência %d ms" % [inventory_device_cycle_rows_processed, int(inventory_device_cycle_metrics.get("pages", 0)), Time.get_time_string_from_system(), latency_ms])
+		if not await _wait_inventory_communication_interval(generation):
+			if generation != inventory_device_cycle_generation:
+				_handoff_visible_inventory_device_cycle()
+			return
+	if not is_inside_tree():
+		inventory_device_cycle_running = false
+
+
+func _process_inventory_communication_page(page_rows: Array[Dictionary]) -> void:
+	for location in page_rows:
+		var serial := _digits_only(str(location.get("serial", "")))
+		var plate := _normalize_location_plate(str(location.get("plate", "")))
+		var vehicle_id := str(location.get("vehicle_id", "")).strip_edges()
+		for product in inventory_device_cycle_products:
+			var product_serial := _digits_only(_location_serial_for_product(product))
+			var product_plate := _normalize_location_plate(str(product.get("plate", product.get("placa", ""))))
+			var product_vehicle_id := str(product.get("vehicle_id", product.get("id", ""))).strip_edges()
+			if (serial != "" and serial == product_serial) or (plate != "" and plate == product_plate) or (vehicle_id != "" and vehicle_id == product_vehicle_id):
+				_update_inventory_communication_status(product, location)
+				break
+
+
+func _inventory_communication_page_state(payload: Variant, current_skip: int, row_count: int) -> Dictionary:
+	var state := _grupo_rs_api_pagination_state(payload, current_skip, row_count)
+	if typeof(payload) != TYPE_DICTIONARY and row_count < INVENTORY_COMMUNICATION_PAGE_SIZE:
+		state["has_more"] = false
+	if bool(state.get("has_more", false)):
+		var pagination: Dictionary = state.get("pagination", {}) as Dictionary
+		var explicit_next := false
+		for key in ["proximoSkip", "proximo_skip", "nextSkip", "next_skip"]:
+			if pagination.has(key):
+				explicit_next = true
+				break
+		state["next_skip"] = max(current_skip + INVENTORY_COMMUNICATION_PAGE_SIZE, int(state.get("next_skip", 0))) if explicit_next else current_skip + INVENTORY_COMMUNICATION_PAGE_SIZE
+	return state
+
+
+func _inventory_communication_next_interval(latency_ms: int) -> float:
+	return min(INVENTORY_COMMUNICATION_MAX_INTERVAL_SECONDS, max(2.0, float(latency_ms) / 1000.0)) if latency_ms > 900 else INVENTORY_COMMUNICATION_TARGET_INTERVAL_SECONDS
+
+
+func _wait_inventory_communication_interval(generation: int) -> bool:
+	var timer := get_tree().create_timer(max(0.1, inventory_device_cycle_effective_interval_seconds))
+	await timer.timeout
+	return is_inside_tree() and inventory_device_cycle_running and generation == inventory_device_cycle_generation
+
+
+func _inventory_communication_record_error(response: Dictionary) -> void:
+	inventory_device_cycle_metrics["errors"] = int(inventory_device_cycle_metrics.get("errors", 0)) + 1
+	var response_code := int(response.get("response_code", 0))
+	if bool(response.get("timeout", false)) or bool(response.get("timed_out", false)):
+		inventory_device_cycle_metrics["timeouts"] = int(inventory_device_cycle_metrics.get("timeouts", 0)) + 1
+	if response_code == 401 or response_code == 403 or str(response.get("stage", "")) == "auth":
+		inventory_device_cycle_metrics["auth_errors"] = int(inventory_device_cycle_metrics.get("auth_errors", 0)) + 1
+	if response_code == 429:
+		inventory_device_cycle_metrics["rate_limits"] = int(inventory_device_cycle_metrics.get("rate_limits", 0)) + 1
+
+
+func _update_inventory_communication_status(product: Dictionary, location: Dictionary) -> void:
+	var serial := _digits_only(_location_serial_for_product(product))
+	if serial == "":
+		serial = _digits_only(str(location.get("serial", "")))
+	if serial == "":
+		return
+	var previous: Dictionary = inventory_communication_history.get(serial, {}) as Dictionary
+	var status: Dictionary = InventoryCommunicationStatusScript.classify(location, previous)
+	status["source"] = "API oficial"
+	inventory_communication_status_cache[serial] = status
+	inventory_communication_history[serial] = {"server_unix": int(status.get("server_unix", 0)), "gps_unix": int(status.get("gps_unix", 0)), "coordinate_fingerprint": str(status.get("coordinate_fingerprint", ""))}
+	inventory_communication_last_updated_at = Time.get_time_string_from_system()
+	_request_inventory_table_refresh()
+
+
+func _update_inventory_communication_status_label(text: String) -> void:
+	if inventory_communication_status_label != null and is_instance_valid(inventory_communication_status_label):
+		inventory_communication_status_label.text = text
 
 
 
@@ -20965,6 +21163,9 @@ func _reset_operational_query_state() -> Dictionary:
 	sga_status_running = 0
 	location_status_cache.clear()
 	location_status_busy.clear()
+	inventory_communication_status_cache.clear()
+	inventory_communication_history.clear()
+	inventory_communication_last_updated_at = ""
 	location_auto_queue.clear()
 	location_auto_running = 0
 	online_location_queue.clear()
@@ -35173,6 +35374,7 @@ func _inventory_row_signature(product: Dictionary) -> String:
 		"sga_busy": bool(sga_status_busy.get(sga_key, false)),
 		"location": location_status_cache.get(serial, {}),
 		"location_busy": bool(location_status_busy.get(serial, false)),
+		"communication": inventory_communication_status_cache.get(serial, {}),
 	}
 	return str(JSON.stringify(payload).hash())
 
@@ -35642,8 +35844,9 @@ func _is_exact_search_match(product: Dictionary) -> bool:
 func _make_serial_location_cell(product: Dictionary, sku: String) -> Control:
 	var serial := str(product.get("imei", sku)).strip_edges()
 	var location_status := _cached_location_status_for_serial(serial)
-	var location_color: Color = location_status.get("color", Color("#0b6fae"))
-	var location_label := str(location_status.get("label", "Consultar localizacao"))
+	var communication_status: Dictionary = inventory_communication_status_cache.get(_digits_only(serial), {})
+	var location_color: Color = _inventory_communication_color(str(communication_status.get("color_key", ""))) if not communication_status.is_empty() else location_status.get("color", Color("#0b6fae"))
+	var location_label := str(communication_status.get("label", location_status.get("label", "Consultar localizacao")))
 
 	var row := HBoxContainer.new()
 	row.custom_minimum_size = Vector2(150, 0)
@@ -35658,6 +35861,8 @@ func _make_serial_location_cell(product: Dictionary, sku: String) -> Control:
 		func(): _show_location_lookup(serial)
 	)
 	map_button.tooltip_text = "Grupo RS: %s" % location_label
+	if not communication_status.is_empty():
+		map_button.tooltip_text += "\n" + _inventory_communication_tooltip(communication_status)
 	var icon_center := CenterContainer.new()
 	icon_center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	icon_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -35683,6 +35888,8 @@ func _make_serial_location_cell(product: Dictionary, sku: String) -> Control:
 
 	var status_hint := Label.new()
 	status_hint.text = _location_status_short_label(location_label)
+	if not communication_status.is_empty() and bool(communication_status.get("gps_issue", false)):
+		status_hint.text = "Possível GPS"
 	status_hint.custom_minimum_size = Vector2(100, 16)
 	status_hint.clip_text = true
 	status_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -35690,11 +35897,36 @@ func _make_serial_location_cell(product: Dictionary, sku: String) -> Control:
 	status_hint.add_theme_font_override("font", UI_FONT)
 	status_hint.add_theme_font_size_override("font_size", 11)
 	status_hint.add_theme_color_override("font_color", location_color)
-	status_hint.tooltip_text = "Grupo RS: %s" % location_label
+	status_hint.tooltip_text = map_button.tooltip_text
 	serial_stack.add_child(status_hint)
 	row.add_child(serial_stack)
 
 	return row
+
+
+func _inventory_communication_color(color_key: String) -> Color:
+	match color_key:
+		"verde":
+			return GREEN
+		"vermelho":
+			return RED
+		"amarelo":
+			return YELLOW
+		"roxo":
+			return Color("#7c3aed")
+		_:
+			return Color("#0b6fae")
+
+
+func _inventory_communication_tooltip(status: Dictionary) -> String:
+	var server_at := str(status.get("server_at", ""))
+	var gps_at := str(status.get("gps_at", ""))
+	return "%s\nServidor: %s\nGPS: %s\n%s" % [
+		str(status.get("label", "Desatualizado")),
+		server_at if server_at != "" else "não informado",
+		gps_at if gps_at != "" else "não informado",
+		str(status.get("reason", "Dados oficiais da API do Estoque.")),
+	]
 
 
 func _location_status_short_label(label: String) -> String:
@@ -35993,6 +36225,21 @@ func _make_table_row(product: Dictionary) -> Control:
 func _make_arya_status_cell(product: Dictionary) -> Control:
 	var wrap := CenterContainer.new()
 	wrap.custom_minimum_size = Vector2(105, 0)
+	var communication_status: Dictionary = inventory_communication_status_cache.get(_digits_only(_location_serial_for_product(product)), {})
+	if not communication_status.is_empty():
+		var communication_label := str(communication_status.get("label", "Desatualizado"))
+		var communication_color := _inventory_communication_color(str(communication_status.get("color_key", "amarelo")))
+		var communication_button := _make_action_button(
+			communication_label,
+			communication_color,
+			communication_color,
+			Color.WHITE,
+			Vector2(104, 34),
+			(func(): _show_arya_status_for_product(product)) if _arya_product_query_value(product) != "" else (func(): _show_location_lookup(_location_serial_for_product(product)))
+		)
+		communication_button.tooltip_text = _inventory_communication_tooltip(communication_status)
+		wrap.add_child(communication_button)
+		return wrap
 
 	var query_key := _arya_product_query_key(product)
 	var query_value := _arya_product_query_value(product)
