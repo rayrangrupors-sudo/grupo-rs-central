@@ -5,8 +5,10 @@ extends RefCounted
 
 const ON_COMMUNICATION_LIMIT_SECONDS := 10 * 60
 const OFF_COMMUNICATION_LIMIT_SECONDS := 60 * 60
-const GPS_LAG_LIMIT_ON_SECONDS := 10 * 60
-const GPS_LAG_LIMIT_OFF_SECONDS := 60 * 60
+# O atraso do GPS é uma regra independente do estado da ignição:
+# somente mais de duas horas entre GPS e servidor indica possível defeito.
+const GPS_LAG_LIMIT_ON_SECONDS := 2 * 60 * 60
+const GPS_LAG_LIMIT_OFF_SECONDS := 2 * 60 * 60
 
 static func classify(sample: Dictionary, previous: Dictionary = {}, now_unix: int = 0) -> Dictionary:
 	var reference_now := now_unix if now_unix > 0 else _now_unix()
