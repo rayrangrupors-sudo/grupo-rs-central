@@ -36439,23 +36439,6 @@ func _make_table_row(product: Dictionary) -> Control:
 func _make_arya_status_cell(product: Dictionary) -> Control:
 	var wrap := CenterContainer.new()
 	wrap.custom_minimum_size = Vector2(105, 0)
-	var communication_key := _inventory_communication_cache_key_for_product(product)
-	var communication_status: Dictionary = inventory_communication_status_cache.get(communication_key, {})
-	if not communication_status.is_empty():
-		var communication_label := str(communication_status.get("label", "Desatualizado"))
-		var communication_color := _inventory_communication_color(str(communication_status.get("color_key", "amarelo")))
-		var communication_button := _make_action_button(
-			communication_label,
-			communication_color,
-			communication_color,
-			Color.WHITE,
-			Vector2(104, 34),
-			(func(): _show_arya_status_for_product(product)) if _arya_product_query_value(product) != "" else (func(): _show_location_lookup(_location_serial_for_product(product)))
-		)
-		communication_button.tooltip_text = _inventory_communication_tooltip(communication_status)
-		wrap.add_child(communication_button)
-		return wrap
-
 	var query_key := _arya_product_query_key(product)
 	var query_value := _arya_product_query_value(product)
 	if query_value == "":
