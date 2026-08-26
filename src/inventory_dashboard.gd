@@ -2741,7 +2741,14 @@ func _branch_supports_monitor_4g() -> bool:
 
 
 func _branch_supports_stock_sync() -> bool:
-	return _branch_feature_enabled("stock_sync", true)
+	return _branch_supports_operational_apis() and _branch_feature_enabled("stock_sync", true)
+
+
+func _branch_supports_operational_apis() -> bool:
+	## Firebase atende o Estoque de todas as filiais. Telemetria, localização,
+	## SGA, Arya, Linksolutions e demais APIs operacionais pertencem somente a
+	## Imperatriz.
+	return selected_branch_id == "imperatriz"
 
 
 func _is_regional_branch() -> bool:
@@ -2770,16 +2777,17 @@ func _grupo_rs_supports_modern_api() -> bool:
 
 
 func _grupo_rs_platform_reads_enabled() -> bool:
-	# As bases antigas ainda dependem do portal para todas as leituras.
-	# O controle abaixo vale para as leituras operacionais substituiveis do
-	# Grupo RS novo; SGA, cadastros, alteracoes, baixa e SMS continuam separados.
+	if not _branch_supports_operational_apis():
+		return false
 	if not _grupo_rs_supports_modern_api():
-		return true
+		return false
 	var settings := _read_json_dictionary(SETTINGS_PATH)
 	return bool(settings.get("grupo_rs_use_platform_reads", true))
 
 
 func _grupo_rs_api_reads_enabled() -> bool:
+	if not _branch_supports_operational_apis():
+		return false
 	if not _grupo_rs_supports_modern_api():
 		return false
 	var settings := _read_json_dictionary(SETTINGS_PATH)
@@ -3430,8 +3438,9 @@ func _open_selected_branch() -> void:
 		var status_callable := Callable(self, "_on_firebase_status_changed")
 		if not firebase_sync.is_connected("status_changed", status_callable):
 			firebase_sync.connect("status_changed", status_callable)
-		if not reuse_preview or str(preview_status.get("state", "")) not in ["synced", "online"]:
-			firebase_sync.call("bind_store", store, selected_branch_id)
+		# A filial aberta deve ser sempre o vinculo ativo do singleton. Uma previa
+		# anterior pode ter terminado (ou ter sido substituida) antes da entrada.
+		firebase_sync.call("bind_store", store, selected_branch_id)
 	_register_integrations_credentials_log()
 	_build_ui()
 	_prepare_startup_animation()
@@ -3445,6 +3454,27 @@ func _open_selected_branch() -> void:
 	_refresh_cloud_status()
 	_show_dashboard()
 	_play_startup_animation()
+	if firebase_sync != null:
+		call_deferred("_refresh_open_branch_from_remote", firebase_sync, selected_branch_id, store)
+
+
+func _refresh_open_branch_from_remote(firebase_sync: Node, branch_id: String, bound_store: Variant) -> void:
+	## Confirma o snapshot da filial aberta e recompõe a tela somente se o vínculo
+	## ainda for o mesmo. A leitura nunca mistura a resposta de uma troca anterior.
+	if firebase_sync == null or not is_instance_valid(firebase_sync):
+		return
+	var result: Variant = await firebase_sync.call("refresh_remote")
+	if branch_id != selected_branch_id or bound_store != store:
+		return
+	if typeof(result) == TYPE_DICTIONARY:
+		_on_firebase_status_changed(result as Dictionary)
+	if not bool((result as Dictionary).get("data_available", false)) if typeof(result) == TYPE_DICTIONARY else true:
+		return
+	match current_section:
+		"inventory":
+			_refresh_table()
+		"dashboard":
+			_show_dashboard()
 func _build_ui() -> void:
 	var background := ColorRect.new()
 	background.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -4748,6 +4778,9 @@ func _setup_st310_location_poll_timer() -> void:
 	if st310_location_poll_timer != null and is_instance_valid(st310_location_poll_timer):
 		st310_location_poll_timer.stop()
 		st310_location_poll_timer.queue_free()
+		st310_location_poll_timer = null
+	if not _branch_supports_operational_apis():
+		return
 	st310_location_poll_timer = Timer.new()
 	st310_location_poll_timer.name = "ST310LocationPollTimer"
 	st310_location_poll_timer.wait_time = 1.0
@@ -4779,6 +4812,9 @@ func _poll_st310_location_packet() -> void:
 
 func _start_online_services() -> void:
 	if not is_inside_tree():
+		return
+	if not _branch_supports_operational_apis():
+		online_services_initialized = true
 		return
 	if not online_services_initialized:
 		online_services_initialized = true
@@ -17694,6 +17730,8 @@ func _clear_inventory_visible_scope() -> void:
 
 
 func schedule_visible_inventory_device_cycle(products: Array[Dictionary], start_index: int, end_index: int, total_count: int) -> void:
+	if not _branch_supports_operational_apis():
+		return
 	var signature := _visible_inventory_device_cycle_signature(products, start_index, end_index, total_count)
 	if signature == inventory_device_cycle_signature and inventory_device_cycle_pending_signature == "":
 		return
@@ -18092,12 +18130,13 @@ func _update_inventory_communication_status(product: Dictionary, location: Dicti
 	status["source"] = "API oficial"
 	var previous_cached: Dictionary = inventory_communication_status_cache.get(cache_key, {}) as Dictionary
 	# A API pode devolver registros históricos fora de ordem. Nunca permita que
-	# uma linha com DataServidor mais antiga regrida a cor, GPS ou comunicação
-	# já promovidos para a mesma linha visível.
-	var current_server_unix := int(previous_cached.get("server_unix", 0))
-	var incoming_server_unix := int(status.get("server_unix", 0))
-	if current_server_unix > 0 and incoming_server_unix > 0 and incoming_server_unix < current_server_unix:
+	# uma linha cronologicamente inferior (ou sem data válida) regrida a cor,
+	# GPS ou comunicação já promovidos para a mesma linha visível.
+	var temporal_order := _inventory_communication_temporal_order(previous_cached, status)
+	if temporal_order < 0:
 		return
+	if temporal_order == 0 and not previous_cached.is_empty():
+		status = _merge_equal_inventory_communication_status(previous_cached, status)
 	if not previous_cached.is_empty() and _inventory_communication_status_signature(previous_cached) == _inventory_communication_status_signature(status):
 		inventory_device_cycle_metrics["cache_unchanged"] = int(inventory_device_cycle_metrics.get("cache_unchanged", 0)) + 1
 		return
@@ -18106,6 +18145,52 @@ func _update_inventory_communication_status(product: Dictionary, location: Dicti
 	inventory_device_cycle_metrics["cache_changed"] = int(inventory_device_cycle_metrics.get("cache_changed", 0)) + 1
 	inventory_communication_last_updated_at = Time.get_time_string_from_system()
 	_request_inventory_table_refresh()
+
+
+func _inventory_communication_temporal_order(current: Dictionary, incoming: Dictionary) -> int:
+	## -1 rejeita a amostra recebida; 0 representa empate; 1 permite promoção.
+	if current.is_empty():
+		return 1
+	var current_server := int(current.get("server_unix", 0))
+	var incoming_server := int(incoming.get("server_unix", 0))
+	if current_server > 0:
+		if incoming_server <= 0:
+			return -1
+		if incoming_server != current_server:
+			return 1 if incoming_server > current_server else -1
+	elif incoming_server > 0:
+		return 1
+
+	# DataGPS só ordena quando DataServidor empata ou está ausente nos dois lados.
+	var current_gps := int(current.get("gps_unix", 0))
+	var incoming_gps := int(incoming.get("gps_unix", 0))
+	if current_gps > 0:
+		if incoming_gps <= 0:
+			return -1
+		if incoming_gps != current_gps:
+			return 1 if incoming_gps > current_gps else -1
+	elif incoming_gps > 0:
+		return 1
+	return 0
+
+
+func _merge_equal_inventory_communication_status(current: Dictionary, incoming: Dictionary) -> Dictionary:
+	## Em empate, preserva o estado confirmado e apenas completa informação que
+	## estava ausente. Nenhum campo válido é substituído por outro equivalente.
+	var merged := current.duplicate(true)
+	for key in incoming.keys():
+		var current_value: Variant = merged.get(key)
+		var incoming_value: Variant = incoming.get(key)
+		if (current_value == null or str(current_value).strip_edges() == "") \
+				and incoming_value != null and str(incoming_value).strip_edges() != "":
+			merged[key] = incoming_value
+	if int(merged.get("ignition_state", -1)) < 0 and int(incoming.get("ignition_state", -1)) >= 0:
+		merged["ignition_state"] = incoming.get("ignition_state")
+	if str(merged.get("coordinate_state", "missing")) != "valid" \
+			and str(incoming.get("coordinate_state", "")) == "valid":
+		merged["coordinate_state"] = "valid"
+		merged["coordinate_fingerprint"] = incoming.get("coordinate_fingerprint", "")
+	return merged
 
 
 func _inventory_communication_status_signature(status: Dictionary) -> String:

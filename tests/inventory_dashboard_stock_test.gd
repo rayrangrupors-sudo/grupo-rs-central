@@ -45,6 +45,7 @@ func _run() -> void:
 	_check_identity_matching(dashboard)
 	_check_icon_palette(dashboard)
 	_check_latest_api_record_wins(dashboard)
+	_check_inventory_temporal_order_matrix(dashboard)
 	_check(dashboard.has_method("_show_form"), "Ação Editar deixou de existir no Estoque.")
 	_check(dashboard.has_method("_request_delete"), "Ação Excluir deixou de existir no Estoque.")
 	_check(dashboard.has_method("_install_equipment"), "Ação Dar baixa deixou de existir no Estoque.")
@@ -131,16 +132,49 @@ func _check_latest_api_record_wins(dashboard: Node) -> void:
 	dashboard.inventory_communication_status_cache.clear()
 	dashboard.inventory_communication_history.clear()
 	var product: Dictionary = {"imei": "9901", "plate": "API-001"}
-	dashboard.set("inventory_device_cycle_products", [product])
+	var active_products: Array[Dictionary] = [product]
+	dashboard.set("inventory_device_cycle_products", active_products)
 	var newer_variant: Variant = dashboard.call("_grupo_rs_api_normalize_location", {"numeroSerie": "9901", "data_servidor": "2026-08-26 12:50:30", "data_gps": "2026-08-26 12:50:30", "ignicao": 0, "latitude": "-5.5", "longitude": "-47.4"})
 	var older_variant: Variant = dashboard.call("_grupo_rs_api_normalize_location", {"numeroSerie": "9901", "data_servidor": "2026-08-26 11:00:00", "data_gps": "2002-08-26 12:49:02", "ignicao": 1, "latitude": "-5.5", "longitude": "-47.4"})
 	if typeof(newer_variant) == TYPE_DICTIONARY and typeof(older_variant) == TYPE_DICTIONARY:
-		dashboard.call("_process_inventory_communication_page", [newer_variant as Dictionary])
-		dashboard.call("_process_inventory_communication_page", [older_variant as Dictionary])
-		var key := str(dashboard.call("_inventory_communication_cache_key_for_product", product))
-		var status: Dictionary = dashboard.inventory_communication_status_cache.get(key, {}) as Dictionary
+		_check(str((newer_variant as Dictionary).get("server_at", "")) != "" and str((newer_variant as Dictionary).get("gps_at", "")) != "", "Normalização removeu as datas sintéticas da amostra recente.")
+		_check(str(dashboard.call("_inventory_match_family", product, newer_variant as Dictionary)) == "serial", "A amostra sintética recente não correspondeu ao produto por série.")
+		var newer_page: Array[Dictionary] = [newer_variant as Dictionary]
+		var older_page: Array[Dictionary] = [older_variant as Dictionary]
+		dashboard.call("_process_inventory_communication_page", newer_page)
+		var synthetic_key := str(dashboard.call("_inventory_communication_cache_key_for_product", product))
+		_check(dashboard.inventory_communication_status_cache.has(synthetic_key), "A amostra sintética recente não foi promovida para a chave esperada.")
+		var first_status: Dictionary = dashboard.inventory_communication_status_cache.get(synthetic_key, {}) as Dictionary
+		_check(int(first_status.get("server_unix", 0)) > 0 and int(first_status.get("gps_unix", 0)) > 0, "A amostra sintética mais recente não produziu timestamps válidos.")
+		dashboard.call("_process_inventory_communication_page", older_page)
+		var status: Dictionary = dashboard.inventory_communication_status_cache.get(synthetic_key, {}) as Dictionary
 		_check(str(status.get("server_at", "")) == "2026-08-26 12:50:30", "Registro histórico substituiu a comunicação mais recente.")
 		_check(str(status.get("gps_at", "")) == "2026-08-26 12:50:30", "DataGPS histórica substituiu o registro atual.")
+
+
+func _check_inventory_temporal_order_matrix(dashboard: Node) -> void:
+	var base := {"server_unix": 200, "gps_unix": 150, "label": "confirmado", "coordinate_state": "valid", "coordinate_fingerprint": "base", "ignition_state": 1}
+	var cases: Array[Dictionary] = [
+		{"name": "ordem normal", "incoming": {"server_unix": 201, "gps_unix": 151}, "expected": 1},
+		{"name": "resposta fora de ordem", "incoming": {"server_unix": 199, "gps_unix": 149}, "expected": -1},
+		{"name": "servidor antigo gps novo", "incoming": {"server_unix": 199, "gps_unix": 999}, "expected": -1},
+		{"name": "servidor novo gps antigo", "incoming": {"server_unix": 201, "gps_unix": 1}, "expected": 1},
+		{"name": "datas invalidas", "incoming": {"server_unix": 0, "gps_unix": 0}, "expected": -1},
+		{"name": "servidor ausente gps novo", "current": {"server_unix": 0, "gps_unix": 150}, "incoming": {"server_unix": 0, "gps_unix": 151}, "expected": 1},
+		{"name": "igualdade", "incoming": {"server_unix": 200, "gps_unix": 150}, "expected": 0},
+	]
+	for item in cases:
+		var current: Dictionary = (item.get("current", base) as Dictionary).duplicate(true)
+		var incoming: Dictionary = (item.get("incoming", {}) as Dictionary).duplicate(true)
+		var order := int(dashboard.call("_inventory_communication_temporal_order", current, incoming))
+		_check(order == int(item.get("expected", 99)), "Ordem temporal incorreta: %s." % str(item.get("name", "caso")))
+
+	var equal_incoming := base.duplicate(true)
+	equal_incoming["label"] = "regressao"
+	equal_incoming["optional_detail"] = "complemento"
+	var merged: Dictionary = dashboard.call("_merge_equal_inventory_communication_status", base, equal_incoming)
+	_check(str(merged.get("label", "")) == "confirmado", "Empate substituiu estado já confirmado.")
+	_check(str(merged.get("optional_detail", "")) == "complemento", "Empate não completou campo antes ausente.")
 
 func _api_row(serial: String, plate: String) -> Dictionary:
 	return {"numeroSerie": serial, "placa": plate, "data_servidor": "2026-08-26 11:59:00", "data_gps": "2026-08-26 11:59:00", "ignicao": 1, "latitude": "-5.5", "longitude": "-47.4"}
