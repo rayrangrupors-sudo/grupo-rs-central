@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="GRUPO RS CENTRAL"
-config/version="4.1.0"
+config/version="4.1.1"
 run/main_scene="res://scenes/estoque_profissional.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 boot_splash/bg_color=Color(0.027451, 0.227451, 0.458824, 1)

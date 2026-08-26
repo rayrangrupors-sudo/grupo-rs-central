@@ -23,6 +23,8 @@ func _run() -> void:
 	_check(bool(repeated.get("repeated_coordinate")) and repeated.get("color_key") == "roxo", "Coordenada repetida com servidor avançando não ficou roxa.")
 	_check(Status.classify(_sample("2026-08-26 11:59:00", "", 1, "-5.5", "-47.4"), {}, now_unix).get("color_key") == "roxo", "Ausência da data GPS não foi sinalizada em roxo.")
 	_check(Status.classify(_sample("2026-08-26 11:59:00", "2026-08-26 11:59:00", 1, "fora", "-47.4"), {}, now_unix).get("color_key") == "roxo", "Coordenada inválida não foi sinalizada em roxo.")
+	var server_alias := Status.classify({"DataServidor": "2026-08-26 11:59:00", "DataGPS": "2026-08-26 11:59:00", "StatusIgnicao": 1, "latitude": "-5.5", "longitude": "-47.4"}, {}, now_unix)
+	_check(server_alias.get("color_key") == "verde" and int(server_alias.get("server_unix", 0)) > 0 and int(server_alias.get("gps_unix", 0)) > 0, "Aliases DataServidor/DataGPS não foram classificados.")
 	var empty := Status.classify({}, {}, now_unix)
 	_check(empty.get("status_key") == "desatualizado" and empty.get("color_key") == "amarelo", "Resposta vazia não ficou desatualizada.")
 	_check(Status.classify({"error": "timeout"}, {}, now_unix).get("status_key") == "desatualizado", "Timeout não ficou desatualizado.")

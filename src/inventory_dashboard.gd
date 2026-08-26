@@ -1329,6 +1329,10 @@ var inventory_device_cycle_metrics: Dictionary = {
 	"requests": 0, "successful_requests": 0, "errors": 0, "timeouts": 0,
 	"auth_errors": 0, "rate_limits": 0, "pages": 0, "rows": 0,
 	"last_latency_ms": -1, "max_latency_ms": -1,
+	"visible_cycles": 0, "visible_queries": 0, "visible_rows": 0,
+	"visible_matches": 0, "visible_unmatched": 0, "visible_ambiguous": 0,
+	"visible_not_found": 0, "visible_errors": 0,
+	"cache_changed": 0, "cache_unchanged": 0,
 }
 var inventory_communication_status_cache: Dictionary = {}
 var inventory_communication_history: Dictionary = {}
@@ -17776,7 +17780,7 @@ func _handoff_visible_inventory_device_cycle() -> void:
 
 func _run_visible_inventory_device_cycle(generation: int) -> void:
 	if _grupo_rs_supports_modern_api() and _grupo_rs_api_reads_enabled():
-		await _run_inventory_communication_page_cycle(generation)
+		await _run_inventory_communication_visible_cycle(generation)
 		return
 
 	# Bases sem a API oficial moderna preservam o ciclo legado.
@@ -17807,6 +17811,87 @@ func _run_visible_inventory_device_cycle(generation: int) -> void:
 
 	if not is_inside_tree():
 		inventory_device_cycle_running = false
+
+
+func _run_inventory_communication_visible_cycle(generation: int) -> void:
+	while inventory_device_cycle_running and is_inside_tree():
+		if generation != inventory_device_cycle_generation:
+			_handoff_visible_inventory_device_cycle()
+			return
+		var visible_products: Array[Dictionary] = inventory_device_cycle_products.duplicate(true)
+		inventory_device_cycle_metrics["visible_cycles"] = int(inventory_device_cycle_metrics.get("visible_cycles", 0)) + 1
+		inventory_device_cycle_page_count = 1 if not visible_products.is_empty() else 0
+		for product in visible_products:
+			if generation != inventory_device_cycle_generation or not inventory_device_cycle_running:
+				if generation != inventory_device_cycle_generation:
+					_handoff_visible_inventory_device_cycle()
+				return
+			var query := _inventory_visible_location_query(product)
+			if query.is_empty():
+				inventory_device_cycle_metrics["visible_unmatched"] = int(inventory_device_cycle_metrics.get("visible_unmatched", 0)) + 1
+				continue
+			var started_msec := Time.get_ticks_msec()
+			inventory_device_cycle_in_flight_generation = generation
+			var response := await _grupo_rs_api_find_location(
+				str(query.get("serial", "")),
+				str(query.get("plate", "")),
+				str(query.get("vehicle_id", "")),
+				false,
+				INVENTORY_COMMUNICATION_PAGE_SIZE
+			)
+			inventory_device_cycle_in_flight_generation = -1
+			if generation != inventory_device_cycle_generation or not inventory_device_cycle_running:
+				if generation != inventory_device_cycle_generation:
+					_handoff_visible_inventory_device_cycle()
+				return
+
+			var latency_ms: int = maxi(0, Time.get_ticks_msec() - started_msec)
+			inventory_device_cycle_metrics["requests"] = int(inventory_device_cycle_metrics.get("requests", 0)) + 1
+			inventory_device_cycle_metrics["visible_queries"] = int(inventory_device_cycle_metrics.get("visible_queries", 0)) + 1
+			inventory_device_cycle_metrics["last_latency_ms"] = latency_ms
+			inventory_device_cycle_metrics["max_latency_ms"] = max(int(inventory_device_cycle_metrics.get("max_latency_ms", -1)), latency_ms)
+			if not bool(response.get("ok", false)):
+				inventory_device_cycle_metrics["visible_errors"] = int(inventory_device_cycle_metrics.get("visible_errors", 0)) + 1
+				_inventory_communication_record_error(response)
+				continue
+
+			inventory_device_cycle_metrics["successful_requests"] = int(inventory_device_cycle_metrics.get("successful_requests", 0)) + 1
+			inventory_device_cycle_metrics["visible_rows"] = int(inventory_device_cycle_metrics.get("visible_rows", 0)) + int(response.get("row_count", 0))
+			inventory_device_cycle_metrics["rows"] = int(inventory_device_cycle_metrics.get("rows", 0)) + int(response.get("row_count", 0))
+			var location_variant: Variant = response.get("location", {})
+			if typeof(location_variant) != TYPE_DICTIONARY or (location_variant as Dictionary).is_empty():
+				inventory_device_cycle_metrics["visible_not_found"] = int(inventory_device_cycle_metrics.get("visible_not_found", 0)) + 1
+				continue
+			var location := location_variant as Dictionary
+			var processed := _process_inventory_communication_page([location])
+			inventory_device_cycle_metrics["visible_matches"] = int(inventory_device_cycle_metrics.get("visible_matches", 0)) + int(processed.get("matched", 0))
+			inventory_device_cycle_metrics["visible_unmatched"] = int(inventory_device_cycle_metrics.get("visible_unmatched", 0)) + int(processed.get("unmatched", 0))
+			inventory_device_cycle_metrics["visible_ambiguous"] = int(inventory_device_cycle_metrics.get("visible_ambiguous", 0)) + int(processed.get("ambiguous", 0))
+
+		inventory_device_cycle_rows_processed = int(inventory_device_cycle_metrics.get("visible_queries", 0))
+		inventory_device_cycle_page_skip = 0
+		inventory_device_cycle_page_count = 0
+		_update_inventory_communication_status_label("API oficial: ciclo visível com %d consulta(s), %d correspondência(s), última atualização %s" % [int(inventory_device_cycle_metrics.get("visible_queries", 0)), int(inventory_device_cycle_metrics.get("visible_matches", 0)), Time.get_time_string_from_system()])
+		if not await _wait_inventory_communication_interval(generation):
+			if generation != inventory_device_cycle_generation:
+				_handoff_visible_inventory_device_cycle()
+			return
+	if not is_inside_tree():
+		inventory_device_cycle_running = false
+
+
+func _inventory_visible_location_query(product: Dictionary) -> Dictionary:
+	var identities := _inventory_product_identity_values(product)
+	var serial := _inventory_first_product_value(product, ["imei", "serial", "numeroSerie", "numero_serie", "numeroSerieEquipamento"])
+	if serial == "":
+		serial = _inventory_first_product_value(product, ["equipment_number", "equipmentNumber", "numeroEquipamento", "numero_equipamento", "numeroEquipamentoTracker"])
+	var plate := _inventory_first_product_value(product, ["plate", "placa", "placaVeiculo", "placa_veiculo"])
+	var vehicle_id := str(identities.get("vehicle_id", ""))
+	if serial == "" and plate == "" and vehicle_id != "":
+		serial = vehicle_id
+	if serial == "" and plate == "" and vehicle_id == "":
+		return {}
+	return {"serial": serial, "plate": plate, "vehicle_id": vehicle_id}
 
 
 func _run_inventory_communication_page_cycle(generation: int) -> void:
@@ -17877,18 +17962,89 @@ func _run_inventory_communication_page_cycle(generation: int) -> void:
 		inventory_device_cycle_running = false
 
 
-func _process_inventory_communication_page(page_rows: Array[Dictionary]) -> void:
+
+func _process_inventory_communication_page(page_rows: Array[Dictionary]) -> Dictionary:
+	var counts := {"matched": 0, "unmatched": 0, "ambiguous": 0}
 	for location in page_rows:
-		var serial := _digits_only(str(location.get("serial", "")))
-		var plate := _normalize_location_plate(str(location.get("plate", "")))
-		var vehicle_id := str(location.get("vehicle_id", "")).strip_edges()
+		var matches: Array[Dictionary] = []
 		for product in inventory_device_cycle_products:
-			var product_serial := _digits_only(_location_serial_for_product(product))
-			var product_plate := _normalize_location_plate(str(product.get("plate", product.get("placa", ""))))
-			var product_vehicle_id := str(product.get("vehicle_id", product.get("id", ""))).strip_edges()
-			if (serial != "" and serial == product_serial) or (plate != "" and plate == product_plate) or (vehicle_id != "" and vehicle_id == product_vehicle_id):
-				_update_inventory_communication_status(product, location)
-				break
+			var family := _inventory_match_family(product, location)
+			if family != "":
+				matches.append({"product": product, "family": family})
+		# Uma localização ambígua não pode promover status para nenhuma linha.
+		if matches.size() == 1:
+			counts["matched"] = int(counts.get("matched", 0)) + 1
+			_update_inventory_communication_status((matches[0] as Dictionary).get("product", {}) as Dictionary, location)
+		elif matches.is_empty():
+			counts["unmatched"] = int(counts.get("unmatched", 0)) + 1
+		else:
+			counts["ambiguous"] = int(counts.get("ambiguous", 0)) + 1
+	return counts
+
+
+func _inventory_identity_value(value: Variant, family: String) -> String:
+	if value == null:
+		return ""
+	var text := str(value).strip_edges()
+	if text == "":
+		return ""
+	if family == "plate":
+		return _normalize_location_plate(text)
+	if family in ["serial", "equipment_number", "equipment_id", "vehicle_id"]:
+		var digits := _digits_only(text)
+		return digits if digits != "" else text.to_lower()
+	return text.to_lower()
+
+
+func _inventory_first_product_value(product: Dictionary, keys: Array[String]) -> String:
+	for key in keys:
+		if product.has(key) and product.get(key) != null:
+			var value := str(product.get(key)).strip_edges()
+			if value != "":
+				return value
+	return ""
+
+
+func _inventory_product_identity_values(product: Dictionary) -> Dictionary:
+	return {
+		"serial": _inventory_identity_value(_inventory_first_product_value(product, ["imei", "serial", "numeroSerie", "numero_serie", "numeroSerieEquipamento"]), "serial"),
+		"equipment_number": _inventory_identity_value(_inventory_first_product_value(product, ["equipment_number", "equipmentNumber", "numeroEquipamento", "numero_equipamento", "numeroEquipamentoTracker"]), "equipment_number"),
+		"equipment_id": _inventory_identity_value(_inventory_first_product_value(product, ["equipment_id", "equipmentId", "equipamento_id", "equipamentoId", "idEquipamento", "id_equipamento", "codEquipamento"]), "equipment_id"),
+		"vehicle_id": _inventory_identity_value(_inventory_first_product_value(product, ["vehicle_id", "vehicleId", "veiculo_id", "veiculoId", "idVeiculo", "id_veiculo"]), "vehicle_id"),
+		"plate": _inventory_identity_value(_inventory_first_product_value(product, ["plate", "placa", "placaVeiculo", "placa_veiculo"]), "plate"),
+	}
+
+
+func _inventory_location_identity_values(location: Dictionary) -> Dictionary:
+	return {
+		"serial": _inventory_identity_value(location.get("serial", ""), "serial"),
+		"equipment_number": _inventory_identity_value(location.get("equipment_number", ""), "equipment_number"),
+		"equipment_id": _inventory_identity_value(location.get("equipment_id", ""), "equipment_id"),
+		"vehicle_id": _inventory_identity_value(location.get("vehicle_id", ""), "vehicle_id"),
+		"plate": _inventory_identity_value(location.get("plate", ""), "plate"),
+	}
+
+
+func _inventory_match_family(product: Dictionary, location: Dictionary) -> String:
+	var product_ids := _inventory_product_identity_values(product)
+	var location_ids := _inventory_location_identity_values(location)
+	# A ordem prioriza as chaves de equipamento antes das chaves veiculares.
+	# Cada comparação é exata após a normalização da própria família.
+	for family in ["equipment_id", "equipment_number", "serial", "plate", "vehicle_id"]:
+		var product_value := str(product_ids.get(family, ""))
+		var location_value := str(location_ids.get(family, ""))
+		if product_value != "" and location_value != "" and product_value == location_value:
+			return family
+	return ""
+
+
+func _inventory_communication_cache_key_for_product(product: Dictionary) -> String:
+	var identities := _inventory_product_identity_values(product)
+	for family in ["serial", "equipment_number", "equipment_id", "vehicle_id", "plate"]:
+		var value := str(identities.get(family, ""))
+		if value != "":
+			return "%s:%s" % [family, value]
+	return ""
 
 
 func _inventory_communication_page_state(payload: Variant, current_skip: int, row_count: int) -> Dictionary:
@@ -17928,18 +18084,32 @@ func _inventory_communication_record_error(response: Dictionary) -> void:
 
 
 func _update_inventory_communication_status(product: Dictionary, location: Dictionary) -> void:
-	var serial := _digits_only(_location_serial_for_product(product))
-	if serial == "":
-		serial = _digits_only(str(location.get("serial", "")))
-	if serial == "":
+	var cache_key := _inventory_communication_cache_key_for_product(product)
+	if cache_key == "":
 		return
-	var previous: Dictionary = inventory_communication_history.get(serial, {}) as Dictionary
+	var previous: Dictionary = inventory_communication_history.get(cache_key, {}) as Dictionary
 	var status: Dictionary = InventoryCommunicationStatusScript.classify(location, previous)
 	status["source"] = "API oficial"
-	inventory_communication_status_cache[serial] = status
-	inventory_communication_history[serial] = {"server_unix": int(status.get("server_unix", 0)), "gps_unix": int(status.get("gps_unix", 0)), "coordinate_fingerprint": str(status.get("coordinate_fingerprint", ""))}
+	var previous_cached: Dictionary = inventory_communication_status_cache.get(cache_key, {}) as Dictionary
+	if not previous_cached.is_empty() and _inventory_communication_status_signature(previous_cached) == _inventory_communication_status_signature(status):
+		inventory_device_cycle_metrics["cache_unchanged"] = int(inventory_device_cycle_metrics.get("cache_unchanged", 0)) + 1
+		return
+	inventory_communication_status_cache[cache_key] = status
+	inventory_communication_history[cache_key] = {"server_unix": int(status.get("server_unix", 0)), "gps_unix": int(status.get("gps_unix", 0)), "coordinate_fingerprint": str(status.get("coordinate_fingerprint", ""))}
+	inventory_device_cycle_metrics["cache_changed"] = int(inventory_device_cycle_metrics.get("cache_changed", 0)) + 1
 	inventory_communication_last_updated_at = Time.get_time_string_from_system()
 	_request_inventory_table_refresh()
+
+
+func _inventory_communication_status_signature(status: Dictionary) -> String:
+	var stable := {}
+	for key in [
+		"status_key", "color_key", "label", "server_at", "gps_at", "server_unix",
+		"gps_unix", "ignition_state", "coordinate_state", "coordinate_fingerprint",
+		"gps_issue", "repeated_coordinate", "reason",
+	]:
+		stable[key] = status.get(key)
+	return JSON.stringify(stable)
 
 
 func _update_inventory_communication_status_label(text: String) -> void:
@@ -22347,6 +22517,11 @@ func _grupo_rs_api_normalize_location(raw: Dictionary) -> Dictionary:
 		"valid" if bool(decoded.get("coordinates_valid", false))
 		else ("invalid" if coordinate_input_present else "missing")
 	)
+	var normalized_equipment_id := _grupo_rs_api_equipment_id_from_row(data)
+	var normalized_equipment_number := _grupo_rs_api_equipment_number_from_row(data)
+	var normalized_vehicle_id := _grupo_rs_api_numeric_string_value(data, ["veiculo_id", "veiculoId", "vehicle_id", "vehicleId", "codVeiculo", "CodVeiculo", "idVeiculo", "id_veiculo"])
+	if normalized_vehicle_id == "" and normalized_equipment_id == 0 and normalized_equipment_number == "":
+		normalized_vehicle_id = _grupo_rs_api_numeric_string_value(data, ["id"])
 	return {
 		"raw": raw.duplicate(true),
 	"decoder": decoded,
@@ -22356,11 +22531,12 @@ func _grupo_rs_api_normalize_location(raw: Dictionary) -> Dictionary:
 	"coordinates_valid": bool(decoded.get("coordinates_valid", false)),
 	"coordinate_state": coordinate_state,
 		"serial": _grupo_rs_api_serial_from_row(data),
-		"plate": _format_grupo_rs_vehicle_plate_for_display(_grupo_rs_api_string_value(data, ["placa", "plate", "Placa"])),
+		"equipment_number": normalized_equipment_number,
+		"plate": _format_grupo_rs_vehicle_plate_for_display(_grupo_rs_api_string_value(data, ["placa", "Placa", "plate", "Plate", "placaVeiculo", "placa_veiculo"])),
 		"client": _grupo_rs_api_string_value(data, ["cliente", "client", "Cliente", "nomeCliente", "nomeClienteTitular", "NomeClienteTitular", "clienteTitular", "ClienteTitular"]),
 		"client_id": _grupo_rs_api_string_value(data, ["cliente_id", "client_id", "idCliente", "codCliente", "cod_cliente"]),
-		"vehicle_id": _grupo_rs_api_numeric_string_value(data, ["veiculo_id", "vehicle_id", "codVeiculo", "CodVeiculo", "idVeiculo", "id"]),
-		"equipment_id": str(_grupo_rs_api_equipment_id_from_row(data)),
+		"vehicle_id": normalized_vehicle_id,
+		"equipment_id": str(normalized_equipment_id),
 		"model": _grupo_rs_api_string_value(data, ["modelo", "Modelo", "model", "Model"]),
 		"brand": _grupo_rs_api_string_value(data, ["marca", "Marca", "brand", "Brand"]),
 		"year": _grupo_rs_api_string_value(data, ["ano", "Ano", "year", "Year"]),
@@ -22379,9 +22555,11 @@ func _grupo_rs_api_normalize_location(raw: Dictionary) -> Dictionary:
 		"lat": decoded_lat,
 		"lng": decoded_lng,
 		"address": _grupo_rs_api_string_value(data, ["endereco", "address", "Endereco"]),
-		"updated_at": _grupo_rs_api_string_value(data, ["ultima_comunicacao", "ultimaComunicacao", "updated_at", "data_comunicacao", "DataComunicacao", "data", "DataEvento", "timestamp"]),
-		"communication_at": _grupo_rs_api_string_value(data, ["ultima_comunicacao", "ultimaComunicacao", "data_comunicacao", "DataComunicacao", "updated_at"]),
-		"event_at": _grupo_rs_api_string_value(data, ["data_evento", "dataEvento", "DataEvento", "event_at", "event_time"]),
+		"server_at": _grupo_rs_api_string_value(data, ["server_at", "serverAt", "data_servidor", "dataServidor", "DataServidor", "server_time", "serverTime", "data_hora_servidor", "dataHoraServidor", "ultima_comunicacao", "ultimaComunicacao", "data_comunicacao", "DataComunicacao", "updated_at"]),
+		"gps_at": _grupo_rs_api_string_value(data, ["gps_at", "gpsAt", "data_gps", "dataGps", "DataGPS", "data_completa", "dataCompleta", "gps_time", "gpsTime", "data_hora_gps", "dataHoraGPS", "data_evento", "dataEvento", "DataEvento", "event_at", "event_time", "data"]),
+		"updated_at": _grupo_rs_api_string_value(data, ["server_at", "serverAt", "data_servidor", "dataServidor", "DataServidor", "server_time", "serverTime", "ultima_comunicacao", "ultimaComunicacao", "updated_at", "data_comunicacao", "DataComunicacao", "data", "DataEvento", "timestamp"]),
+		"communication_at": _grupo_rs_api_string_value(data, ["server_at", "serverAt", "data_servidor", "dataServidor", "DataServidor", "server_time", "serverTime", "ultima_comunicacao", "ultimaComunicacao", "data_comunicacao", "DataComunicacao", "updated_at"]),
+		"event_at": _grupo_rs_api_string_value(data, ["gps_at", "gpsAt", "data_gps", "dataGps", "DataGPS", "data_evento", "dataEvento", "DataEvento", "event_at", "event_time"]),
 		"ignition": _grupo_rs_api_string_value(data, ["ignicao", "Ignicao", "StatusIgnicao", "status_ignicao", "ignition", "Ignition", "ignicao_status", "ignition_status"]),
 		"speed": _grupo_rs_api_string_value(data, ["velocidade", "speed", "Velocidade"]),
 		# A API usa `bateria` como tensao (ex.: 12 V) e pode expor o percentual
@@ -22563,7 +22741,7 @@ func _grupo_rs_api_invalidate_vehicle_cache() -> void:
 
 
 func _grupo_rs_api_equipment_id_from_row(row: Dictionary, allow_generic_id: bool = false) -> int:
-	var direct_keys: Array[String] = ["codEquipamento", "CodEquipamento", "codigoEquipamento", "equipamento_id", "equipment_id", "idEquipamento", "id_equipamento"]
+	var direct_keys: Array[String] = ["codEquipamento", "CodEquipamento", "codigoEquipamento", "equipamento_id", "equipment_id", "equipmentId", "equipamentoId", "idEquipamento", "id_equipamento"]
 	if allow_generic_id:
 		direct_keys.append("id")
 		direct_keys.append("codigo")
@@ -22575,21 +22753,35 @@ func _grupo_rs_api_equipment_id_from_row(row: Dictionary, allow_generic_id: bool
 		var nested: Variant = row.get(key)
 		if typeof(nested) != TYPE_DICTIONARY:
 			continue
-		var nested_id := _grupo_rs_api_numeric_string_value(nested as Dictionary, ["codEquipamento", "CodEquipamento", "id", "codigo", "code"])
+		var nested_id := _grupo_rs_api_numeric_string_value(nested as Dictionary, ["codEquipamento", "CodEquipamento", "codigoEquipamento", "equipamento_id", "equipment_id", "equipmentId", "equipamentoId", "id", "codigo", "code"])
 		if nested_id.is_valid_int():
 			return int(nested_id)
 	return 0
 
 
+func _grupo_rs_api_equipment_number_from_row(row: Dictionary) -> String:
+	var direct := _grupo_rs_api_string_value(row, ["numeroEquipamento", "numero_equipamento", "numeroEquipamentoTracker", "numero_equipamento_tracker", "equipment_number", "equipmentNumber", "numeroRastreador", "numero_rastreador"])
+	if direct != "":
+		return direct
+	for key in ["equipamento", "equipment", "tracker"]:
+		var nested: Variant = row.get(key)
+		if typeof(nested) != TYPE_DICTIONARY:
+			continue
+		var nested_number := _grupo_rs_api_string_value(nested as Dictionary, ["numeroEquipamento", "numero_equipamento", "numeroEquipamentoTracker", "numero_equipamento_tracker", "equipment_number", "equipmentNumber", "numeroRastreador", "numero_rastreador"])
+		if nested_number != "":
+			return nested_number
+	return ""
+
+
 func _grupo_rs_api_serial_from_row(data: Dictionary) -> String:
-	var direct := _grupo_rs_api_string_value(data, ["serial", "numero_serie", "numeroSerie", "numeroSerieEquipamento", "imei", "IMEI"])
+	var direct := _grupo_rs_api_string_value(data, ["serial", "Serial", "numero_serie", "numeroSerie", "numeroSerieEquipamento", "serialEquipamento", "imei", "IMEI", "numeroEquipamento", "numero_equipamento"])
 	if direct != "":
 		return direct
 	for key in ["equipamento", "equipment", "tracker"]:
 		var nested: Variant = data.get(key)
 		if typeof(nested) != TYPE_DICTIONARY:
 			continue
-		var nested_serial := _grupo_rs_api_string_value(nested as Dictionary, ["numeroSerie", "numero_serie", "numeroSerieEquipamento", "numeroEquipamento", "numero_equipamento", "imei", "IMEI"])
+		var nested_serial := _grupo_rs_api_string_value(nested as Dictionary, ["serial", "Serial", "numeroSerie", "numero_serie", "numeroSerieEquipamento", "serialEquipamento", "numeroEquipamento", "numero_equipamento", "imei", "IMEI"])
 		if nested_serial != "":
 			return nested_serial
 	return ""
@@ -23006,7 +23198,7 @@ func _grupo_rs_api_reassignment_row_is_complete(row: Dictionary, target_plate: S
 	return true
 
 
-func _grupo_rs_api_find_location(serial: String, plate: String, vehicle_id: String = "", allow_full_scan: bool = true) -> Dictionary:
+func _grupo_rs_api_find_location(serial: String, plate: String, vehicle_id: String = "", allow_full_scan: bool = true, take_size: int = GRUPO_RS_API_PAGE_SIZE) -> Dictionary:
 	# The official endpoint supports q filtering. Prefer the narrow query so a
 	# plate lookup never depends on the first page of the global location list.
 	var query := plate.strip_edges()
@@ -23014,7 +23206,7 @@ func _grupo_rs_api_find_location(serial: String, plate: String, vehicle_id: Stri
 		query = serial.strip_edges()
 	if query != "":
 		var direct_response := await _grupo_rs_api_get(
-			"/endpoints/localizacao.php?q=%s&skip=0&take=%d" % [query.uri_encode(), GRUPO_RS_API_PAGE_SIZE],
+			"/endpoints/localizacao.php?q=%s&skip=0&take=%d" % [query.uri_encode(), clampi(take_size, 1, GRUPO_RS_API_PAGE_SIZE)],
 			true,
 			true
 		)
@@ -23047,20 +23239,33 @@ func _grupo_rs_api_find_location(serial: String, plate: String, vehicle_id: Stri
 		var requested_vehicle_id := _search_key(vehicle_id)
 		var requested_serial := _search_key(serial)
 		var requested_plate := _normalize_location_plate(plate)
+		var direct_matches: Array[Dictionary] = []
 		for location in direct_rows:
 			var matches_vehicle := requested_vehicle_id != "" and _search_key(str(location.get("vehicle_id", ""))) == requested_vehicle_id
 			var matches_serial := requested_serial != "" and _search_key(str(location.get("serial", ""))) == requested_serial
 			var matches_plate := requested_plate != "" and _normalize_location_plate(str(location.get("plate", ""))) == requested_plate
 			if matches_vehicle or matches_serial or matches_plate:
-				return {
-					"ok": true,
-					"location": location,
-					"direct": true,
-					"stage": "location",
-					"response_code": int(direct_response.get("response_code", 0)),
-					"parse_ok": true,
-					"row_count": direct_rows.size(),
-				}
+				direct_matches.append(location)
+		if direct_matches.size() == 1:
+			return {
+				"ok": true,
+				"location": direct_matches[0],
+				"direct": true,
+				"stage": "location",
+				"response_code": int(direct_response.get("response_code", 0)),
+				"parse_ok": true,
+				"row_count": direct_rows.size(),
+			}
+		if direct_matches.size() > 1:
+			return {
+				"ok": false,
+				"ambiguous": true,
+				"message": "A API retornou multiplas localizacoes para a consulta exata.",
+				"stage": "location_match",
+				"response_code": int(direct_response.get("response_code", 0)),
+				"parse_ok": true,
+				"row_count": direct_rows.size(),
+			}
 		if direct_rows.is_empty():
 			return {
 				"ok": true,
@@ -35364,6 +35569,7 @@ func _inventory_row_signature(product: Dictionary) -> String:
 	var arya_key := _arya_product_query_key(product)
 	var sga_key := _sga_product_cache_key(product)
 	var serial := _digits_only(_location_serial_for_product(product))
+	var communication_key := _inventory_communication_cache_key_for_product(product)
 	var payload := {
 		"product": product,
 		"exact": _is_exact_search_match(product),
@@ -35374,7 +35580,7 @@ func _inventory_row_signature(product: Dictionary) -> String:
 		"sga_busy": bool(sga_status_busy.get(sga_key, false)),
 		"location": location_status_cache.get(serial, {}),
 		"location_busy": bool(location_status_busy.get(serial, false)),
-		"communication": inventory_communication_status_cache.get(serial, {}),
+		"communication": inventory_communication_status_cache.get(communication_key, {}),
 	}
 	return str(JSON.stringify(payload).hash())
 
@@ -35844,7 +36050,8 @@ func _is_exact_search_match(product: Dictionary) -> bool:
 func _make_serial_location_cell(product: Dictionary, sku: String) -> Control:
 	var serial := str(product.get("imei", sku)).strip_edges()
 	var location_status := _cached_location_status_for_serial(serial)
-	var communication_status: Dictionary = inventory_communication_status_cache.get(_digits_only(serial), {})
+	var communication_key := _inventory_communication_cache_key_for_product(product)
+	var communication_status: Dictionary = inventory_communication_status_cache.get(communication_key, {})
 	var location_color: Color = _inventory_communication_color(str(communication_status.get("color_key", ""))) if not communication_status.is_empty() else location_status.get("color", Color("#0b6fae"))
 	var location_label := str(communication_status.get("label", location_status.get("label", "Consultar localizacao")))
 
@@ -36225,7 +36432,8 @@ func _make_table_row(product: Dictionary) -> Control:
 func _make_arya_status_cell(product: Dictionary) -> Control:
 	var wrap := CenterContainer.new()
 	wrap.custom_minimum_size = Vector2(105, 0)
-	var communication_status: Dictionary = inventory_communication_status_cache.get(_digits_only(_location_serial_for_product(product)), {})
+	var communication_key := _inventory_communication_cache_key_for_product(product)
+	var communication_status: Dictionary = inventory_communication_status_cache.get(communication_key, {})
 	if not communication_status.is_empty():
 		var communication_label := str(communication_status.get("label", "Desatualizado"))
 		var communication_color := _inventory_communication_color(str(communication_status.get("color_key", "amarelo")))
@@ -45814,6 +46022,7 @@ func _make_action_button(text_value: String, fill: Color, border: Color, font_co
 
 func _make_icon_action_button(icon_path: String, fill: Color, border: Color, min_size: Vector2, callback: Callable) -> Button:
 	var button := _make_action_button("", fill, border, Color.WHITE, min_size, callback)
+	var palette := _button_palette(fill, border, Color.WHITE)
 
 	var center := CenterContainer.new()
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -45825,6 +46034,7 @@ func _make_icon_action_button(icon_path: String, fill: Color, border: Color, min
 	icon.custom_minimum_size = Vector2(22, 22)
 	icon.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
 	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.modulate = palette.get("font", Color.WHITE)
 	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	center.add_child(icon)
 

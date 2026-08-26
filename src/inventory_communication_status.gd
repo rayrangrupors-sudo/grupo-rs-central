@@ -10,11 +10,12 @@ const GPS_LAG_LIMIT_OFF_SECONDS := 60 * 60
 
 static func classify(sample: Dictionary, previous: Dictionary = {}, now_unix: int = 0) -> Dictionary:
 	var reference_now := now_unix if now_unix > 0 else _now_unix()
-	var server_at := _first_value(sample, ["server_at", "serverAt", "data_servidor", "dataServidor", "server_time", "communication_at", "ultima_comunicacao", "ultimaComunicacao", "data_comunicacao", "DataComunicacao", "updated_at"])
-	var gps_at := _first_value(sample, ["gps_at", "gpsAt", "data_gps", "dataGps", "data_completa", "dataCompleta", "gps_time", "data_evento", "dataEvento", "DataEvento", "event_at", "event_time", "data"])
+	var server_at := _first_value(sample, ["server_at", "serverAt", "data_servidor", "dataServidor", "DataServidor", "server_time", "serverTime", "data_hora_servidor", "dataHoraServidor", "communication_at", "ultima_comunicacao", "ultimaComunicacao", "data_comunicacao", "DataComunicacao", "updated_at"])
+	var gps_at := _first_value(sample, ["gps_at", "gpsAt", "data_gps", "dataGps", "DataGPS", "data_completa", "dataCompleta", "gps_time", "gpsTime", "data_hora_gps", "dataHoraGPS", "data_evento", "dataEvento", "DataEvento", "event_at", "event_time", "data"])
 	var server_unix := parse_datetime(server_at)
 	var gps_unix := parse_datetime(gps_at)
-	var ignition_state := ignition(sample.get("ignition", sample.get("ignicao", null)))
+	var ignition_value := _first_value(sample, ["ignition", "Ignition", "ignicao", "Ignicao", "StatusIgnicao", "status_ignicao", "ignicao_status", "ignition_status"])
+	var ignition_state := ignition(ignition_value)
 	var coordinate := _coordinate_state(sample)
 	var communication_limit := OFF_COMMUNICATION_LIMIT_SECONDS if ignition_state == 0 else ON_COMMUNICATION_LIMIT_SECONDS
 	var gps_lag_limit := GPS_LAG_LIMIT_OFF_SECONDS if ignition_state == 0 else GPS_LAG_LIMIT_ON_SECONDS

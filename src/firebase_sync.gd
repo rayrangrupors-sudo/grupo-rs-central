@@ -13,6 +13,7 @@ const MAX_RETRY_SECONDS := 300.0
 const CONNECTION_PROBE_ROOT := "health/connection_probe"
 const DEFAULT_DATABASE_URL := "https://grupo-rs-central-165dc-default-rtdb.firebaseio.com"
 const SECTIONS := ["products", "movements", "system_logs", "maintenances"]
+const STOCK_LIVE_READ_ONLY_ARGUMENT := "--stock-live-read-only"
 
 var _store: Variant = null
 var _branch_id := ""
@@ -37,6 +38,8 @@ var _read_verified := false
 var _write_verified := false
 var _last_probe_at := ""
 var _last_probe_message := ""
+var _stock_live_read_only := false
+var _read_only_blocked_mutations := 0
 var _status := {
 	"state": "not_configured",
 	"message": "Firebase ainda nao configurado.",
@@ -53,6 +56,7 @@ var _status := {
 
 
 func _ready() -> void:
+	_stock_live_read_only = STOCK_LIVE_READ_ONLY_ARGUMENT in OS.get_cmdline_user_args()
 	_sync_timer = Timer.new()
 	_sync_timer.one_shot = true
 	_sync_timer.wait_time = SYNC_DEBOUNCE_SECONDS
@@ -132,7 +136,7 @@ func bind_store(store: Variant, branch_id: String) -> void:
 			_pending_snapshot = (queued_snapshot as Dictionary).duplicate(true)
 			_pending_dirty = true
 	_mark_store_unavailable()
-	if _store != null and _store.has_signal("database_saved"):
+	if _store != null and _store.has_signal("database_saved") and not _stock_live_read_only:
 		var save_callable := Callable(self, "on_database_saved")
 		if not _store.database_saved.is_connected(save_callable):
 			_store.database_saved.connect(save_callable)
@@ -202,8 +206,19 @@ func get_status() -> Dictionary:
 		and _store.has_method("is_remote_available") \
 		and bool(_store.call("is_remote_available")) \
 		and _read_verified \
-		and _write_verified
+		and (_write_verified or _stock_live_read_only)
 	return result
+
+
+func is_stock_live_read_only() -> bool:
+	return _stock_live_read_only
+
+
+func get_read_only_metrics() -> Dictionary:
+	return {
+		"enabled": _stock_live_read_only,
+		"blocked_mutations": _read_only_blocked_mutations,
+	}
 
 
 func get_configuration_summary() -> Dictionary:
@@ -216,6 +231,9 @@ func get_configuration_summary() -> Dictionary:
 
 
 func force_sync() -> void:
+	if _stock_live_read_only:
+		_set_status("read_only", "Modo de validacao somente leitura ativo.")
+		return
 	if _store == null or not _is_configured():
 		return
 	if _store.has_method("is_remote_available") and not bool(_store.call("is_remote_available")):
@@ -234,6 +252,9 @@ func force_sync() -> void:
 func sync_now() -> Dictionary:
 	## Flush a alteracao operacional atual e somente retorna quando o Firebase
 	## confirmou a gravacao ou informou uma falha explicita.
+	if _stock_live_read_only:
+		_set_status("read_only", "Modo de validacao somente leitura ativo.")
+		return {"ok": false, "state": "read_only", "message": "Sincronizacao mutavel desabilitada no modo somente leitura."}
 	if _store == null or _branch_id == "":
 		return {"ok": false, "state": "not_configured", "message": "Base Firebase nao vinculada."}
 	if not _is_configured():
@@ -344,6 +365,11 @@ func refresh_remote(health_only: bool = false) -> Dictionary:
 	## segundo plano enquanto o operador permanece na tela de localizacao.
 	if _store == null or _branch_id == "" or not _is_configured():
 		return get_status()
+	if _stock_live_read_only and health_only:
+		if _sync_busy:
+			return get_status()
+		await _initial_sync()
+		return get_status()
 	if health_only:
 		if _sync_busy or _request_in_flight or _circuit_is_open():
 			return get_status()
@@ -368,6 +394,9 @@ func refresh_remote(health_only: bool = false) -> Dictionary:
 
 
 func on_database_saved(snapshot: Dictionary, _db_path: String) -> void:
+	if _stock_live_read_only:
+		_set_status("read_only", "Alteracoes mutaveis desabilitadas no modo somente leitura.")
+		return
 	if _branch_id == "":
 		return
 	if not snapshot.is_empty():
@@ -396,7 +425,7 @@ func _on_sync_timer_timeout() -> void:
 
 
 func _on_probe_timer_timeout() -> void:
-	if not _is_configured() or _sync_busy:
+	if _stock_live_read_only or not _is_configured() or _sync_busy:
 		return
 	_circuit_open_until = 0
 	_set_status("connecting", "Testando a conexao com o Firebase...")
@@ -459,6 +488,14 @@ func _initial_sync() -> void:
 
 	_record_synced_state(remote_snapshot, remote_hash if remote_hash != "" else _snapshot_hash(remote_snapshot), remote_hash if remote_hash != "" else _snapshot_hash(remote_snapshot))
 	_last_sync_at = Time.get_datetime_string_from_system(false, true)
+	if _stock_live_read_only:
+		_read_verified = true
+		_write_verified = false
+		_last_probe_at = _last_sync_at
+		_last_probe_message = "Leitura da filial confirmada; sonda de escrita desabilitada."
+		_sync_busy = false
+		_set_status("synced", "Dados carregados diretamente do Firebase em modo somente leitura." if remote_value != null else "Firebase online. Esta base ainda nao possui registros.")
+		return
 	var verification := await _verify_connection_read_write()
 	if not bool(verification.get("ok", false)):
 		_mark_store_unavailable()
@@ -552,6 +589,9 @@ func _pending_row_identity(section: String, row: Dictionary, index: int) -> Stri
 
 
 func _perform_pending_sync(initial_upload: bool = false) -> void:
+	if _stock_live_read_only:
+		_set_status("read_only", "Sincronizacao mutavel desabilitada no modo somente leitura.")
+		return
 	if _sync_busy or (not _pending_dirty and _pending_snapshot.is_empty()) or not _is_configured():
 		return
 	if _store == null:
@@ -773,6 +813,15 @@ func _branch_state() -> Dictionary:
 
 
 func _database_request(method: int, path: String, body: Variant = null) -> Dictionary:
+	if _stock_live_read_only and method in [HTTPClient.METHOD_PATCH, HTTPClient.METHOD_PUT, HTTPClient.METHOD_DELETE]:
+		_read_only_blocked_mutations += 1
+		return {
+			"ok": false,
+			"blocked": true,
+			"read_only": true,
+			"code": 0,
+			"error": "read_only_mutation_blocked",
+		}
 	if _circuit_is_open():
 		return {"ok": false, "offline": true}
 	if not await _ensure_auth():
@@ -946,6 +995,16 @@ func _set_status(state: String, message: String) -> void:
 
 
 func _verify_connection_read_write() -> Dictionary:
+	if _stock_live_read_only:
+		_read_only_blocked_mutations += 2
+		return {
+			"ok": true,
+			"state": "synced",
+			"read_only": true,
+			"read_ok": true,
+			"write_ok": false,
+			"message": "Sonda de escrita desabilitada no modo somente leitura.",
+		}
 	var probe_id := _device_id().sha256_text().left(24)
 	var probe_path := "%s/%s" % [CONNECTION_PROBE_ROOT, probe_id]
 	var probe_time := Time.get_datetime_string_from_system(false, true)
@@ -1014,6 +1073,15 @@ func _verify_connection_read_write() -> Dictionary:
 
 
 func _write_health_heartbeat() -> Dictionary:
+	if _stock_live_read_only:
+		_read_only_blocked_mutations += 1
+		return {
+			"ok": false,
+			"blocked": true,
+			"read_only": true,
+			"code": 0,
+			"error": "read_only_mutation_blocked",
+		}
 	return await _database_request(
 		HTTPClient.METHOD_PATCH,
 		"health/ping",
