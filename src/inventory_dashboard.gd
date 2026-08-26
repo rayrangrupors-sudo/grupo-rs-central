@@ -18091,6 +18091,13 @@ func _update_inventory_communication_status(product: Dictionary, location: Dicti
 	var status: Dictionary = InventoryCommunicationStatusScript.classify(location, previous)
 	status["source"] = "API oficial"
 	var previous_cached: Dictionary = inventory_communication_status_cache.get(cache_key, {}) as Dictionary
+	# A API pode devolver registros históricos fora de ordem. Nunca permita que
+	# uma linha com DataServidor mais antiga regrida a cor, GPS ou comunicação
+	# já promovidos para a mesma linha visível.
+	var current_server_unix := int(previous_cached.get("server_unix", 0))
+	var incoming_server_unix := int(status.get("server_unix", 0))
+	if current_server_unix > 0 and incoming_server_unix > 0 and incoming_server_unix < current_server_unix:
+		return
 	if not previous_cached.is_empty() and _inventory_communication_status_signature(previous_cached) == _inventory_communication_status_signature(status):
 		inventory_device_cycle_metrics["cache_unchanged"] = int(inventory_device_cycle_metrics.get("cache_unchanged", 0)) + 1
 		return

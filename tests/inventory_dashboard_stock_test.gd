@@ -44,6 +44,7 @@ func _run() -> void:
 	await _check_visible_round(dashboard)
 	_check_identity_matching(dashboard)
 	_check_icon_palette(dashboard)
+	_check_latest_api_record_wins(dashboard)
 	_check(dashboard.has_method("_show_form"), "Ação Editar deixou de existir no Estoque.")
 	_check(dashboard.has_method("_request_delete"), "Ação Excluir deixou de existir no Estoque.")
 	_check(dashboard.has_method("_install_equipment"), "Ação Dar baixa deixou de existir no Estoque.")
@@ -125,6 +126,21 @@ func _check_icon_palette(dashboard: Node) -> void:
 	soft_button.queue_free()
 	blue_button.queue_free()
 	red_button.queue_free()
+
+func _check_latest_api_record_wins(dashboard: Node) -> void:
+	dashboard.inventory_communication_status_cache.clear()
+	dashboard.inventory_communication_history.clear()
+	var product: Dictionary = {"imei": "9901", "plate": "API-001"}
+	dashboard.set("inventory_device_cycle_products", [product])
+	var newer_variant: Variant = dashboard.call("_grupo_rs_api_normalize_location", {"numeroSerie": "9901", "data_servidor": "2026-08-26 12:50:30", "data_gps": "2026-08-26 12:50:30", "ignicao": 0, "latitude": "-5.5", "longitude": "-47.4"})
+	var older_variant: Variant = dashboard.call("_grupo_rs_api_normalize_location", {"numeroSerie": "9901", "data_servidor": "2026-08-26 11:00:00", "data_gps": "2002-08-26 12:49:02", "ignicao": 1, "latitude": "-5.5", "longitude": "-47.4"})
+	if typeof(newer_variant) == TYPE_DICTIONARY and typeof(older_variant) == TYPE_DICTIONARY:
+		dashboard.call("_process_inventory_communication_page", [newer_variant as Dictionary])
+		dashboard.call("_process_inventory_communication_page", [older_variant as Dictionary])
+		var key := str(dashboard.call("_inventory_communication_cache_key_for_product", product))
+		var status: Dictionary = dashboard.inventory_communication_status_cache.get(key, {}) as Dictionary
+		_check(str(status.get("server_at", "")) == "2026-08-26 12:50:30", "Registro histórico substituiu a comunicação mais recente.")
+		_check(str(status.get("gps_at", "")) == "2026-08-26 12:50:30", "DataGPS histórica substituiu o registro atual.")
 
 func _api_row(serial: String, plate: String) -> Dictionary:
 	return {"numeroSerie": serial, "placa": plate, "data_servidor": "2026-08-26 11:59:00", "data_gps": "2026-08-26 11:59:00", "ignicao": 1, "latitude": "-5.5", "longitude": "-47.4"}
