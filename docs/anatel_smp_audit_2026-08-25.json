@@ -1,0 +1,62 @@
+{
+  "audit_date": "2026-08-25",
+  "source_url": "https://www.anatel.gov.br/dadosabertos/paineis_de_dados/outorga_e_licenciamento/estacoes_smp.zip",
+  "source_last_modified": "Tue, 25 Aug 2026 10:56:40 GMT",
+  "source_zip_bytes": 91381047,
+  "source_zip_sha256": "976C4BB3ABFC8F777D54D595DF1D944E12550FE653CB67EFB649ECABF8903051",
+  "source_entry": "Estacoes_SMP.csv",
+  "source_entry_bytes": 984082927,
+  "full_scan": {
+    "mode": "streaming_quote_aware",
+    "rows_processed": 3292893,
+    "malformed_rows": 0,
+    "invalid_coordinates_in_regional_bounds": 0,
+    "generation_rows": {
+      "blank": 7809,
+      "2G": 732528,
+      "3G": 664530,
+      "4G": 1644558,
+      "5G": 243468
+    },
+    "regional_generation_rows_before_deduplication": {
+      "2G": 2139,
+      "3G": 2052,
+      "4G": 2877,
+      "5G": 561
+    }
+  },
+  "derived_regional_catalog": {
+    "path": "data/anatel_smp_regional.json",
+    "selected_rows": 7629,
+    "unique_stations": 667,
+    "unique_by_generation": {
+      "2G": 112,
+      "3G": 170,
+      "4G": 247,
+      "5G": 138
+    },
+    "scope": "UF MA; licensed; 2G/3G/4G/5G; lat -7.25..-4.0; lng -49.0..-46.5",
+    "coordinates_inferred": 0
+  },
+  "failed_attempts": [
+    {
+      "stage": "powershell_text_field_parser",
+      "cause": "Throughput insufficient; manually interrupted after approximately three minutes",
+      "rows_committed": 0,
+      "artifacts_replaced": false
+    },
+    {
+      "stage": "csharp_add_type",
+      "cause": "-ReferencedAssemblies replaced default references; Dictionary, List and ZipFile did not compile",
+      "rows_processed": 0,
+      "artifacts_replaced": false
+    },
+    {
+      "stage": "powershell_header_validation",
+      "cause": "Windows PowerShell interpreted UTF-8 literals without BOM as ANSI; accented header became mojibake",
+      "rows_selected": 0,
+      "artifacts_replaced": false,
+      "fix": "Unicode Form D header normalization and ASCII lookup names"
+    }
+  ]
+}

@@ -1,12 +1,14 @@
 class_name AnatelCoverage
 extends RefCounted
 
-const NATIONAL_DATA_PATH := "res://data/anatel_smp_2g4g_brasil.json"
-const REGIONAL_DATA_PATH := "res://data/anatel_smp_2g4g_regional.json"
-const DEFAULT_DATA_PATH := NATIONAL_DATA_PATH
+const NATIONAL_DATA_PATH := "res://data/anatel_smp_brasil.json"
+const REGIONAL_DATA_PATH := "res://data/anatel_smp_regional.json"
+const LEGACY_NATIONAL_DATA_PATH := "res://data/anatel_smp_2g4g_brasil.json"
+const LEGACY_REGIONAL_DATA_PATH := "res://data/anatel_smp_2g4g_regional.json"
+const DEFAULT_DATA_PATH := REGIONAL_DATA_PATH
 const OPERATORS := ["CLARO", "TIM", "VIVO"]
 const MAP_OPERATORS := ["CLARO", "TIM", "VIVO", "OUTRAS"]
-const GENERATIONS := ["2G", "4G"]
+const GENERATIONS := ["2G", "3G", "4G", "5G"]
 const EARTH_RADIUS_KM := 6371.0
 const REAL_WINDOW_MINUTES := 15
 const GRID_STATION_BUCKET_KM := 4.0
@@ -21,7 +23,7 @@ var loaded_path := ""
 func load_snapshot(path: String = "") -> Dictionary:
 	var requested_path := path.strip_edges()
 	if requested_path == "":
-		requested_path = NATIONAL_DATA_PATH if FileAccess.file_exists(NATIONAL_DATA_PATH) else REGIONAL_DATA_PATH
+		requested_path = REGIONAL_DATA_PATH
 	if not stations.is_empty() and loaded_path == requested_path:
 		return {
 			"ok": true,
@@ -29,7 +31,7 @@ func load_snapshot(path: String = "") -> Dictionary:
 			"stations": stations.size(),
 		}
 	if not FileAccess.file_exists(requested_path):
-		load_error = "Catalogo nacional da Anatel nao encontrado."
+		load_error = "Catalogo regional auditavel da Anatel nao encontrado."
 		return {"ok": false, "message": load_error}
 	stations.clear()
 	metadata.clear()
@@ -67,7 +69,7 @@ func load_snapshot(path: String = "") -> Dictionary:
 		station["lng"] = longitude
 		stations.append(station)
 	if stations.is_empty():
-		load_error = "Catalogo da Anatel nao retornou ERBs 2G/4G validas."
+		load_error = "Catalogo da Anatel nao retornou ERBs 2G/3G/4G/5G validas."
 		return {"ok": false, "message": load_error}
 	loaded_path = requested_path
 	load_error = ""
@@ -150,6 +152,7 @@ func search_stations(filters: Dictionary, region_catalog: Array = []) -> Diction
 	var raw_operator_filter := str(filters.get("operator", "")).strip_edges()
 	var operator_key := _normalize_operator(raw_operator_filter)
 	var generation_key := _normalize_generation(str(filters.get("generation", "")))
+	var status_key := _normalize_text(str(filters.get("status", "")))
 	var city_region: Dictionary = {}
 	if city_key != "":
 		city_region = _find_city_region(city_key, region_catalog)
@@ -166,14 +169,10 @@ func search_stations(filters: Dictionary, region_catalog: Array = []) -> Diction
 		if state_key != "" and not _station_matches_state(station, state_key, region_catalog):
 			continue
 		if city_key != "":
+			# Municipio e filtrado somente pelo valor publicado pela Anatel. A
+			# proximidade geografica nunca e usada para preencher campo ausente.
 			var station_city := _normalize_text(str(station.get("city", "")))
-			var in_city := _area_contains(station_city, city_key) if city_region.is_empty() else distance_km(
-				float(center.get("lat", -5.5264)),
-				float(center.get("lng", -47.4919)),
-				float(station.get("lat", 0.0)),
-				float(station.get("lng", 0.0))
-			) <= city_radius
-			if not in_city:
+			if not _area_contains(station_city, city_key):
 				continue
 		if place_key != "":
 			var station_place := "%s %s %s" % [
@@ -185,6 +184,8 @@ func search_stations(filters: Dictionary, region_catalog: Array = []) -> Diction
 				continue
 		if raw_operator_filter != "" and operator_key in MAP_OPERATORS \
 				and _normalize_operator(str(station.get("operator", ""))) != operator_key:
+			continue
+		if status_key != "" and not _area_contains(_normalize_text(str(station.get("status", ""))), status_key):
 			continue
 		var item := station.duplicate(true)
 		item["distance_km"] = distance_km(
@@ -221,6 +222,7 @@ func search_stations(filters: Dictionary, region_catalog: Array = []) -> Diction
 		"radius_km": city_radius,
 		"area_label": area_label,
 		"filters": filters.duplicate(true),
+		"metadata": metadata.duplicate(true),
 		"message": "%d ERB(s) encontradas" % result.size() if not result.is_empty() else "Nenhuma ERB encontrada para os filtros informados.",
 	}
 
@@ -910,8 +912,12 @@ func _normalize_generation(value: String) -> String:
 	var clean := value.strip_edges().to_upper()
 	if clean.contains("2G") or clean.contains("GSM"):
 		return "2G"
+	if clean.contains("3G") or clean.contains("WCDMA") or clean.contains("UMTS"):
+		return "3G"
 	if clean.contains("4G") or clean.contains("LTE"):
 		return "4G"
+	if clean.contains("5G") or clean.contains("NR"):
+		return "5G"
 	return "4G"
 
 

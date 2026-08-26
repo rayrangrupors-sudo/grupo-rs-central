@@ -15,11 +15,13 @@ func _init() -> void:
 	_check(integration.is_current(second_generation), "Geração atual não foi preservada.")
 
 	var rows: Array[Dictionary] = [
-		{"plate": "ABC1D23", "serial": "100", "client": "Cliente A", "lat": -5.5264, "lng": -47.4919},
-		{"plate": "XYZ9K88", "serial": "200", "client": "Cliente B", "lat": -5.5300, "lng": -47.4900},
+		{"plate": "ABC1D23", "serial": "SN-100", "client": "Cliente A", "lat": -5.5264, "lng": -47.4919},
+		{"plate": "XYZ9K88", "serial": "SN-200", "client": "Cliente B", "lat": -5.5300, "lng": -47.4900},
 	]
 	var selected := integration.select_vehicle(rows, "xyz9k88")
-	_check(str(selected.get("serial", "")) == "200", "A pesquisa não selecionou o veículo solicitado.")
+	_check(str(selected.get("serial", "")) == "SN-200", "A seleção visual não preservou o veículo solicitado.")
+	var visual_fallback := integration.select_vehicle(rows, "inexistente")
+	_check(str(visual_fallback.get("serial", "")) == "SN-100", "O fallback visual legado mudou de contrato.")
 
 	var stations: Array[Dictionary] = [
 		{"id": "tower-1", "operator": "TIM", "generation": "4G", "lat": -5.5265, "lng": -47.4920},
@@ -36,6 +38,11 @@ func _init() -> void:
 	var no_location := integration.compose_map_state({"plate": "NOPOS", "lat": 0.0, "lng": 0.0}, stations)
 	_check(not bool(no_location.get("has_vehicle_location", true)), "Coordenada 0,0 foi tratada como localização válida.")
 	_check((no_location.get("stations", []) as Array).is_empty(), "ERBs foram associadas a veículo sem localização.")
+	_check(not integration.valid_coordinates(0.0, 0.0), "O par 0,0 foi aceito.")
+	_check(integration.valid_coordinates(0.0, -51.0), "Latitude zero com longitude válida foi rejeitada.")
+	_check(integration.valid_coordinates(-10.0, 0.0), "Longitude zero com latitude válida foi rejeitada.")
+	_check(not integration.valid_coordinates(91.0, -51.0), "Latitude fora do limite foi aceita.")
+	_check(not integration.valid_coordinates(-10.0, -181.0), "Longitude fora do limite foi aceita.")
 
 	if failures.is_empty():
 		print("VEHICLE_LOCATION_INTEGRATION_TEST: OK")

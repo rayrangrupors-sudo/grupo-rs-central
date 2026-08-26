@@ -9,15 +9,27 @@ const DEFAULT_CITY_LABEL := "Imperatriz - MA"
 const DEFAULT_LATITUDE := -5.5264
 const DEFAULT_LONGITUDE := -47.4919
 const DEFAULT_ZOOM := 13
-const MIN_ZOOM := 12
+# Até existir uma redução nacional auditável baseada em ERBs reais, o mapa
+# operacional não expõe os centroides agregados de z4/z6/z8.
+const MIN_ZOOM := 10
 const MAX_ZOOM := 17
 
-# O provedor fica isolado para permitir a troca por satélite sem alterar o
-# canvas, a busca de veículos ou a camada de ERBs.
-const TILE_PROVIDER_ID := "esri_world_imagery"
-const TILE_URL_TEMPLATE := "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/%d/%d/%d"
-const TILE_ATTRIBUTION := "Esri World Imagery"
+# O provedor fica isolado para permitir manutenção sem alterar o canvas, a
+# busca de veículos ou a camada de ERBs. A experiência final usa somente OSM.
+const TILE_PROVIDER_ID := "openstreetmap"
+const TILE_URL_TEMPLATE := "https://tile.openstreetmap.org/%d/%d/%d.png"
+const TILE_ATTRIBUTION := "© OpenStreetMap contributors"
 const TILE_SIZE := 256
+const BASEMAP_NORMAL := "normal"
+const DEFAULT_BASEMAP := BASEMAP_NORMAL
+const BASEMAPS := {
+	BASEMAP_NORMAL: {
+		"id": "openstreetmap",
+		"label": "OpenStreetMap",
+		"url_template": "https://tile.openstreetmap.org/%d/%d/%d.png",
+		"attribution": "© OpenStreetMap contributors",
+	},
+}
 
 const REGIONS := [
 	{"id": "imperatriz", "label": "Imperatriz - MA", "lat": -5.5264, "lng": -47.4919, "zoom": 13, "radius_km": 16.0},
@@ -37,4 +49,10 @@ static func default_center() -> Dictionary:
 
 
 static func default_view() -> Dictionary:
-	return {"center": default_center(), "zoom": DEFAULT_ZOOM}
+	return {"center": default_center(), "zoom": DEFAULT_ZOOM, "basemap": DEFAULT_BASEMAP}
+
+
+static func basemap(_value: String = DEFAULT_BASEMAP) -> Dictionary:
+	# Valores antigos, inclusive "satellite", convergem para OSM. Assim um
+	# estado persistido não reintroduz um provedor removido.
+	return (BASEMAPS[DEFAULT_BASEMAP] as Dictionary).duplicate(true)

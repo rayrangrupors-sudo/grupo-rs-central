@@ -7,26 +7,27 @@ extends RefCounted
 const Config := preload("res://src/features/big_map/big_map_config.gd")
 
 
-static func cache_key(zoom: int, tile_x: int, tile_y: int) -> String:
-	return "%s/%d/%d/%d" % [Config.TILE_PROVIDER_ID, zoom, tile_x, tile_y]
+static func cache_key(zoom: int, tile_x: int, tile_y: int, basemap_id: String = Config.BASEMAP_NORMAL) -> String:
+	var provider := Config.basemap(basemap_id)
+	return "%s/%d/%d/%d" % [str(provider.get("id", Config.TILE_PROVIDER_ID)), zoom, tile_x, tile_y]
 
 
-static func tile_url(zoom: int, tile_x: int, tile_y: int) -> String:
-	# O endpoint World_Imagery usa a ordem z/y/x, enquanto o canvas trabalha
-	# internamente com coordenadas x/y.
-	return Config.TILE_URL_TEMPLATE % [zoom, tile_y, tile_x]
+static func tile_url(zoom: int, tile_x: int, tile_y: int, basemap_id: String = Config.BASEMAP_NORMAL) -> String:
+	var provider := Config.basemap(basemap_id)
+	var template := str(provider.get("url_template", Config.TILE_URL_TEMPLATE))
+	return template % [zoom, tile_x, tile_y]
 
 
-static func attribution() -> String:
-	return Config.TILE_ATTRIBUTION
+static func attribution(basemap_id: String = Config.BASEMAP_NORMAL) -> String:
+	return str(Config.basemap(basemap_id).get("attribution", Config.TILE_ATTRIBUTION))
 
 
-static func texture_from_bytes(bytes: PackedByteArray) -> Texture2D:
+static func image_from_bytes(bytes: PackedByteArray) -> Image:
 	if bytes.is_empty():
 		return null
 	var tile_image := Image.new()
-	# O provedor Esri World Imagery responde JPEG. Mantemos PNG como primeira
-	# tentativa para preservar compatibilidade com caches e provedores antigos.
+	# O endpoint de tiles padrão do OpenStreetMap responde PNG. JPEG permanece
+	# aceito apenas como tolerância de decodificação, não como segundo provedor.
 	var is_png := bytes.size() >= 8 \
 			and bytes[0] == 0x89 \
 			and bytes[1] == 0x50 \
@@ -49,7 +50,15 @@ static func texture_from_bytes(bytes: PackedByteArray) -> Texture2D:
 	if decode_status != OK:
 		return null
 	tile_image.convert(Image.FORMAT_RGBA8)
-	return ImageTexture.create_from_image(tile_image)
+	return tile_image
+
+
+static func texture_from_image(tile_image: Image) -> Texture2D:
+	return ImageTexture.create_from_image(tile_image) if tile_image != null and not tile_image.is_empty() else null
+
+
+static func texture_from_bytes(bytes: PackedByteArray) -> Texture2D:
+	return texture_from_image(image_from_bytes(bytes))
 
 
 static func texture_from_png(bytes: PackedByteArray) -> Texture2D:

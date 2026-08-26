@@ -73,6 +73,8 @@ const SMART_4G_RESOLUTION_CACHE_KEY := "smart_4g_resolution_cache"
 const SMART_4G_SCAN_LIMIT := 200
 const SMART_4G_SCAN_CONCURRENCY := 1
 const SMART_4G_TILE_CONCURRENCY := 4
+const SMART_4G_TILE_CACHE_LIMIT := 160
+const SMART_4G_NAVIGATION_IO_DEBOUNCE_SECONDS := 0.075
 const SMART_4G_SCAN_PROGRESS_INTERVAL_MS := 250
 const SMART_4G_SCAN_WORKER_POLL_SECONDS := 0.2
 const SMART_4G_GEOCODE_CACHE_SECONDS := 900
@@ -1118,6 +1120,20 @@ var smart_4g_progress_stage_label: Label
 var smart_4g_map_canvas: Smart4GMapCanvas
 var smart_4g_tile_cache: Dictionary = {}
 var smart_4g_tile_cache_order: Array[String] = []
+var smart_4g_tile_texture_cache: Dictionary = {}
+var smart_4g_tile_network_request_count := 0
+var smart_4g_tile_cache_hit_count := 0
+var smart_4g_tile_decode_count := 0
+var smart_4g_tile_cache_eviction_count := 0
+var smart_4g_tile_cancelled_load_count := 0
+var smart_4g_tile_last_load_msec := -1
+var smart_4g_tile_last_first_tile_msec := -1
+var smart_4g_tile_last_total_count := 0
+var smart_4g_tile_last_reused_count := 0
+var smart_4g_tile_last_missing_count := 0
+var smart_4g_tile_cancelled_http_count := 0
+var smart_4g_tile_decode_total_msec := 0
+var smart_4g_tile_decode_max_msec := 0
 var smart_4g_map_title_label: Label
 var smart_4g_map_count_label: Label
 var smart_4g_station_details_panel: PanelContainer
@@ -1185,6 +1201,13 @@ var vehicle_location_filtered_rows: Array[Dictionary] = []
 var vehicle_location_selected: Dictionary = {}
 var vehicle_location_refreshing := false
 var vehicle_location_source := ""
+var vehicle_location_last_query_error_count := 0
+var vehicle_location_last_query_diagnostic: Dictionary = {}
+var vehicle_location_query_trigger := "unknown"
+var vehicle_location_debounce_enabled := true
+var vehicle_location_api_exclusive := false
+var vehicle_location_queue_after_api_success_only := false
+var vehicle_location_pending_queries: Array[String] = []
 var vehicle_location_map_generation := 0
 var vehicle_location_query_generation := 0
 var vehicle_location_integration: VehicleLocationIntegration
@@ -4826,7 +4849,7 @@ func _ensure_smart_4g_anatel() -> void:
 	# A tela inicia no recorte regional do mapa. Ele possui metadados de
 	# atualizacao e evita misturar o catalogo nacional legado sem data com o
 	# enquadramento regional exibido ao operador.
-	var regional_catalog_path := "res://data/anatel_smp_2g4g_regional.json"
+	var regional_catalog_path := "res://data/anatel_smp_regional.json"
 	var loaded: Dictionary = smart_4g_anatel.call(
 		"load_snapshot",
 		regional_catalog_path if FileAccess.file_exists(regional_catalog_path) else ""
@@ -9304,7 +9327,8 @@ func _on_vehicle_location_query_changed(_value: String) -> void:
 			vehicle_location_status_label.text = "Digite pelo menos 2 caracteres"
 			vehicle_location_status_label.add_theme_color_override("font_color", MUTED)
 		return
-	call_deferred("_debounced_vehicle_location_query", vehicle_location_query_generation)
+	if vehicle_location_debounce_enabled:
+		call_deferred("_debounced_vehicle_location_query", vehicle_location_query_generation)
 
 
 func _vehicle_location_queries_from_input(value: String) -> Array[String]:
@@ -9338,12 +9362,15 @@ func _add_vehicle_location_query() -> void:
 	for query in queries:
 		var key := _search_key(query)
 		var already_queued := false
-		for queued in vehicle_location_query_queue:
+		for queued in vehicle_location_query_queue + vehicle_location_pending_queries:
 			if _search_key(queued) == key:
 				already_queued = true
 				break
-		if not already_queued and vehicle_location_query_queue.size() < 24:
-			vehicle_location_query_queue.append(query)
+		if not already_queued and vehicle_location_query_queue.size() + vehicle_location_pending_queries.size() < 24:
+			if vehicle_location_queue_after_api_success_only:
+				vehicle_location_pending_queries.append(query)
+			else:
+				vehicle_location_query_queue.append(query)
 			added += 1
 	vehicle_location_plate_input.clear()
 	_refresh_vehicle_location_queue_ui()
@@ -9353,6 +9380,9 @@ func _add_vehicle_location_query() -> void:
 			vehicle_location_status_label.add_theme_color_override("font_color", ORANGE)
 		return
 	vehicle_location_query_generation += 1
+	if vehicle_location_queue_after_api_success_only and vehicle_location_status_label != null and is_instance_valid(vehicle_location_status_label):
+		vehicle_location_status_label.text = "Consultando a API Grupo RS antes de adicionar à fila..."
+		vehicle_location_status_label.add_theme_color_override("font_color", BLUE)
 	_apply_vehicle_location_filters()
 	call_deferred("_refresh_vehicle_location_view", vehicle_location_query_generation)
 
@@ -9374,6 +9404,7 @@ func _remove_vehicle_location_query(query: String) -> void:
 
 func _clear_vehicle_location_queue() -> void:
 	vehicle_location_query_queue.clear()
+	vehicle_location_pending_queries.clear()
 	vehicle_location_query_generation += 1
 	if vehicle_location_plate_input != null and is_instance_valid(vehicle_location_plate_input):
 		vehicle_location_plate_input.clear()
@@ -9447,6 +9478,40 @@ func _vehicle_location_merge_identity(location: Dictionary, identity: Dictionary
 		if str(merged.get(key, "")).strip_edges() == "" and str(identity.get(key, "")).strip_edges() != "":
 			merged[key] = identity.get(key)
 	return merged
+
+
+func _vehicle_location_has_valid_coordinates(location: Dictionary) -> bool:
+	var latitude_text := str(location.get("lat", "")).replace(",", ".").strip_edges()
+	var longitude_text := str(location.get("lng", "")).replace(",", ".").strip_edges()
+	if not latitude_text.is_valid_float() or not longitude_text.is_valid_float():
+		return false
+	return vehicle_location_integration.valid_coordinates(float(latitude_text), float(longitude_text))
+
+
+func _vehicle_location_restore_latest_api_position(location: Dictionary) -> Dictionary:
+	## O resumo de localizacao pode conter identidade/status sem a coordenada.
+	## Nessa situacao, consulte somente o registro recente do mesmo veiculo.
+	if _vehicle_location_has_valid_coordinates(location):
+		return location
+	var vehicle_id := str(location.get("vehicle_id", "")).strip_edges()
+	var reference_datetime := str(location.get("updated_at", location.get("communication_at", ""))).strip_edges()
+	if vehicle_id == "" or reference_datetime == "":
+		return location
+	var event_result := await _grupo_rs_api_latest_event(vehicle_id, reference_datetime)
+	if not bool(event_result.get("ok", false)):
+		return location
+	var event: Variant = event_result.get("event", {})
+	if typeof(event) != TYPE_DICTIONARY:
+		return location
+	var restored := _vehicle_location_merge_identity(
+		_grupo_rs_api_normalize_location(event as Dictionary),
+		location
+	)
+	if not _vehicle_location_has_valid_coordinates(restored):
+		return location
+	restored["coordinate_source"] = "latest_event"
+	restored["source"] = "API Grupo RS"
+	return restored
 
 
 func _fetch_vehicle_location_decoder_rows(query: String = "") -> Dictionary:
@@ -9543,7 +9608,30 @@ func _fetch_vehicle_location_api_rows_smart(query: String = "") -> Dictionary:
 		return {"ok": false, "message": "API oficial desabilitada."}
 	var clean_query := query.strip_edges()
 	if clean_query != "":
-		var direct_result := await _grupo_rs_api_find_location(clean_query, clean_query, "", false)
+		if clean_query.to_lower().begins_with("cliente:"):
+			var client_query := clean_query.substr(clean_query.find(":") + 1).strip_edges()
+			if client_query == "":
+				return {"ok": true, "rows": [], "not_found": true, "stage": "client"}
+			return await _fetch_vehicle_location_api_rows_by_client(client_query)
+		var descriptor := vehicle_location_integration.describe_location_query(clean_query)
+		if not bool(descriptor.get("valid", false)):
+			return {"ok": true, "rows": [], "not_found": true}
+		var normalized_query := str(descriptor.get("normalized", ""))
+		var is_plate := str(descriptor.get("kind", "")) == VehicleLocationIntegration.QUERY_KIND_PLATE
+		# Preserve a grafia recebida na primeira consulta. Algumas implantações
+		# filtram `q` pelo valor exibido/cadastrado, enquanto outras aceitam apenas
+		# a chave compacta. A igualdade local abaixo continua sempre normalizada.
+		var direct_result := await _grupo_rs_api_find_location(
+			"" if is_plate else normalized_query,
+			clean_query if is_plate else "",
+			"",
+			false
+		)
+		if is_plate \
+				and bool(direct_result.get("ok", false)) \
+				and (direct_result.get("location", {}) as Dictionary).is_empty() \
+				and clean_query != normalized_query:
+			direct_result = await _grupo_rs_api_find_location("", normalized_query, "", false)
 		if bool(direct_result.get("ok", false)):
 			var direct_location: Variant = direct_result.get("location", {})
 			if typeof(direct_location) == TYPE_DICTIONARY:
@@ -9556,26 +9644,42 @@ func _fetch_vehicle_location_api_rows_smart(query: String = "") -> Dictionary:
 					var direct_identity := await _grupo_rs_api_find_vehicle(direct_plate, "", true, false)
 					if bool(direct_identity.get("ok", false)):
 						normalized_direct = _vehicle_location_merge_identity(normalized_direct, direct_identity.get("row", {}) as Dictionary)
-				return {"ok": true, "rows": [normalized_direct], "direct": true}
+				if vehicle_location_integration.row_matches_exact_query(normalized_direct, clean_query):
+					normalized_direct = await _vehicle_location_restore_latest_api_position(normalized_direct)
+					return {
+						"ok": true,
+						"rows": [normalized_direct],
+						"direct": true,
+						"stage": str(direct_result.get("stage", "location")),
+						"response_code": int(direct_result.get("response_code", 0)),
+						"parse_ok": bool(direct_result.get("parse_ok", true)),
+					}
 		# A localizacao pode nao carregar o numero de serie, embora o endpoint
 		# de equipamentos conheca a associacao. Resolva serie -> placa -> posicao
 		# antes de considerar a consulta como inexistente.
-		if _digits_only(clean_query) != "":
-			var equipment_result := await _grupo_rs_api_find_equipment(clean_query, true)
+		# Uma série pode ter sete caracteres e coincidir com o formato visual de
+		# placa. Sem correspondência direta exata, tente também a associação de
+		# série antes de declarar a consulta inexistente.
+		if normalized_query != "":
+			var equipment_result := await _grupo_rs_api_find_equipment(normalized_query, true)
 			var identity_row: Dictionary = {}
 			if bool(equipment_result.get("ok", false)):
 				identity_row = equipment_result.get("row", {}) as Dictionary
 			# O endpoint de equipamentos nem sempre devolve a placa. Nesse caso,
 			# consulte o indice de veiculos em blocos de 40 para resolver a relacao.
 			if identity_row.is_empty() or _grupo_rs_api_string_value(identity_row, ["placa", "plate", "Placa"]) == "":
-				var vehicle_result := await _grupo_rs_api_find_vehicle("", clean_query, true, true)
+				var vehicle_result := await _grupo_rs_api_find_vehicle("", normalized_query, true, true)
 				if bool(vehicle_result.get("ok", false)):
 					identity_row = vehicle_result.get("row", {}) as Dictionary
 			if not identity_row.is_empty():
+				var normalized_identity := _grupo_rs_api_normalize_location(identity_row)
+				normalized_identity = _vehicle_location_merge_identity(normalized_identity, identity_row)
+				normalized_identity["coordinate_state"] = str(normalized_identity.get("coordinate_state", "missing"))
+				normalized_identity["source"] = "API Grupo RS"
 				var equipment_plate := _grupo_rs_api_string_value(identity_row, ["placa", "plate", "Placa"])
 				var equipment_vehicle_id := _grupo_rs_api_string_value(identity_row, ["veiculo_id", "vehicle_id", "codVeiculo", "CodVeiculo", "idVeiculo"])
 				if equipment_plate != "":
-					var by_plate := await _grupo_rs_api_find_location(clean_query, equipment_plate, equipment_vehicle_id, false)
+					var by_plate := await _grupo_rs_api_find_location(normalized_query, equipment_plate, equipment_vehicle_id, false)
 					if bool(by_plate.get("ok", false)):
 						var location_by_plate: Variant = by_plate.get("location", {})
 						if typeof(location_by_plate) == TYPE_DICTIONARY:
@@ -9584,13 +9688,28 @@ func _fetch_vehicle_location_api_rows_smart(query: String = "") -> Dictionary:
 							if typeof(raw_by_plate) == TYPE_DICTIONARY:
 								normalized_by_plate = _grupo_rs_api_normalize_location(raw_by_plate as Dictionary)
 							normalized_by_plate = _vehicle_location_merge_identity(normalized_by_plate, identity_row)
-							return {"ok": true, "rows": [normalized_by_plate], "direct": true, "resolved_by_equipment": true}
-		# Placa e serie continuam usando os caminhos diretos acima. Como o
-		# endpoint de veiculos tambem devolve o cliente, este fallback permite a
-		# mesma cadeia para consultas por nome sem transformar o nome em placa.
-		var client_result := await _fetch_vehicle_location_api_rows_by_client(clean_query)
-		if bool(client_result.get("ok", false)) and not (client_result.get("rows", []) as Array).is_empty():
-			return client_result
+							if vehicle_location_integration.row_matches_exact_query(normalized_by_plate, clean_query):
+								return {"ok": true, "rows": [normalized_by_plate], "direct": true, "resolved_by_equipment": true}
+				if vehicle_location_integration.row_matches_exact_query(normalized_identity, clean_query):
+					return {"ok": true, "rows": [normalized_identity], "direct": true, "identity_only": true}
+		if is_plate:
+			var plate_identity_result := await _grupo_rs_api_find_vehicle(clean_query, "", true, false)
+			if bool(plate_identity_result.get("ok", false)):
+				var plate_identity := _grupo_rs_api_normalize_location(plate_identity_result.get("row", {}) as Dictionary)
+				plate_identity = _vehicle_location_merge_identity(plate_identity, plate_identity_result.get("row", {}) as Dictionary)
+				plate_identity["coordinate_state"] = str(plate_identity.get("coordinate_state", "missing"))
+				plate_identity["source"] = "API Grupo RS"
+				if vehicle_location_integration.row_matches_exact_query(plate_identity, clean_query):
+					return {"ok": true, "rows": [plate_identity], "direct": true, "identity_only": true}
+		if bool(direct_result.get("ok", false)):
+			return {
+				"ok": true,
+				"rows": [],
+				"not_found": true,
+				"stage": str(direct_result.get("stage", "location")),
+				"response_code": int(direct_result.get("response_code", 0)),
+				"parse_ok": bool(direct_result.get("parse_ok", true)),
+			}
 		return direct_result
 	# A listagem global pode conter milhares de registros e nao deve bloquear a
 	# tela aguardando todas as paginas. A busca direta acima localiza qualquer
@@ -9633,7 +9752,7 @@ func _fetch_vehicle_location_api_rows_by_client(client_query: String) -> Diction
 			continue
 		var vehicle := _grupo_rs_api_normalize_location(raw as Dictionary)
 		var client_text := _search_key(str(vehicle.get("client", "")))
-		if query_key != "" and client_text.contains(query_key):
+		if query_key != "" and client_text == query_key:
 			candidates.append(vehicle)
 	if candidates.is_empty():
 		# Algumas versões do endpoint aceitam q apenas para placa/modelo. A
@@ -9645,7 +9764,7 @@ func _fetch_vehicle_location_api_rows_by_client(client_query: String) -> Diction
 				if typeof(value) != TYPE_DICTIONARY:
 					continue
 				var vehicle := value as Dictionary
-				if query_key != "" and _search_key(str(vehicle.get("client", ""))).contains(query_key):
+				if query_key != "" and _search_key(str(vehicle.get("client", ""))) == query_key:
 					candidates.append(vehicle.duplicate(true))
 	if candidates.is_empty():
 		return {"ok": true, "rows": [], "not_found": true, "message": "Nenhum veiculo associado ao cliente informado."}
@@ -9660,8 +9779,18 @@ func _fetch_vehicle_location_api_rows_by_client(client_query: String) -> Diction
 		if not bool(location_result.get("ok", false)):
 			continue
 		var location: Variant = location_result.get("location", {})
-		if typeof(location) == TYPE_DICTIONARY:
-			locations.append(_vehicle_location_merge_identity(location as Dictionary, vehicle))
+		if typeof(location) == TYPE_DICTIONARY and not (location as Dictionary).is_empty():
+			var located := _vehicle_location_merge_identity(location as Dictionary, vehicle)
+			located["source"] = "API Grupo RS"
+			locations.append(located)
+		else:
+			var identity_only := vehicle.duplicate(true)
+			identity_only["lat"] = ""
+			identity_only["lng"] = ""
+			identity_only["coordinates_valid"] = false
+			identity_only["coordinate_state"] = "missing"
+			identity_only["source"] = "API Grupo RS"
+			locations.append(identity_only)
 	return {
 		"ok": true,
 		"rows": locations,
@@ -9736,10 +9865,36 @@ func _vehicle_location_row_key(location: Dictionary) -> String:
 	return ""
 
 
+func _vehicle_location_api_row_matches_query(row: Dictionary, query: String) -> bool:
+	var clean_query := query.strip_edges()
+	if clean_query.to_lower().begins_with("cliente:"):
+		var expected_client := _search_key(clean_query.substr(clean_query.find(":") + 1))
+		return expected_client != "" and _search_key(str(row.get("client", ""))) == expected_client
+	return vehicle_location_integration.row_matches_exact_query(row, clean_query)
+
+
 func _refresh_vehicle_location_view(expected_generation: int = -1) -> void:
 	if vehicle_location_refreshing:
 		return
-	var lookup_queries: Array[String] = vehicle_location_query_queue.duplicate()
+	vehicle_location_last_query_error_count = 0
+	vehicle_location_last_query_diagnostic = {
+		"stage": "prepare",
+		"category": "pending",
+		"response_code": 0,
+		"timeout": false,
+		"parse_ok": true,
+		"row_count": 0,
+		"exact_match": false,
+		"generation": expected_generation,
+		"current_generation": vehicle_location_query_generation,
+		"trigger": vehicle_location_query_trigger,
+		"queue_count": vehicle_location_query_queue.size(),
+	}
+	var lookup_queries: Array[String] = (
+		vehicle_location_pending_queries.duplicate()
+		if not vehicle_location_pending_queries.is_empty()
+		else vehicle_location_query_queue.duplicate()
+	)
 	if lookup_queries.is_empty() and vehicle_location_plate_input != null and is_instance_valid(vehicle_location_plate_input):
 		var typed_query := vehicle_location_plate_input.text.strip_edges()
 		if typed_query != "":
@@ -9759,39 +9914,52 @@ func _refresh_vehicle_location_view(expected_generation: int = -1) -> void:
 		vehicle_location_status_label.add_theme_color_override("font_color", BLUE)
 	var normalized: Array[Dictionary] = []
 	var seen_rows: Dictionary = {}
-	var api_errors: Array[String] = []
+	# Registre a confirmação no mesmo ponto em que a linha da API é aceita.
+	# A consolidação da fila não deve executar um segundo matcher sobre o
+	# agregado, pois a identidade pode ter sido completada em outra etapa da
+	# própria API e uma consulta mais nova pode chegar enquanto esta aguarda.
+	var confirmed_lookup_keys: Dictionary = {}
+	var api_error_count := 0
 	for lookup_query in lookup_queries:
 		var api_result: Dictionary = await _fetch_vehicle_location_api_rows_smart(lookup_query)
+		vehicle_location_last_query_diagnostic = _vehicle_location_sanitized_diagnostic(
+			api_result,
+			expected_generation,
+			vehicle_location_query_trigger,
+			vehicle_location_query_queue.size()
+		)
 		if expected_generation >= 0 and expected_generation != vehicle_location_query_generation:
 			vehicle_location_refreshing = false
 			call_deferred("_refresh_vehicle_location_view", vehicle_location_query_generation)
 			return
 		if not bool(api_result.get("ok", false)):
-			var error_message := str(api_result.get("message", "API indisponível")).strip_edges()
-			if error_message != "":
-				api_errors.append("%s: %s" % [lookup_query, error_message])
+			api_error_count += 1
 		for row in api_result.get("rows", []) as Array:
 			if typeof(row) != TYPE_DICTIONARY:
 				continue
 			var normalized_row := (row as Dictionary).duplicate(true)
+			if not _vehicle_location_api_row_matches_query(normalized_row, lookup_query):
+				continue
+			confirmed_lookup_keys[_search_key(lookup_query)] = true
 			var row_key := _vehicle_location_row_key(normalized_row)
 			if row_key != "" and seen_rows.has(row_key):
 				continue
 			if row_key != "":
 				seen_rows[row_key] = true
-			var operator_info := await _resolve_vehicle_location_operator(normalized_row)
-			if expected_generation >= 0 and expected_generation != vehicle_location_query_generation:
-				vehicle_location_refreshing = false
-				call_deferred("_refresh_vehicle_location_view", vehicle_location_query_generation)
-				return
-			var resolved_operator := str(operator_info.get("operator", "")).strip_edges()
-			if resolved_operator != "":
-				normalized_row["tracker_operator"] = resolved_operator
-				normalized_row["tracker_operator_source"] = str(operator_info.get("source", ""))
-				if str(normalized_row.get("operator", "")).strip_edges() == "":
-					normalized_row["operator"] = resolved_operator
+			if not vehicle_location_api_exclusive:
+				var operator_info := await _resolve_vehicle_location_operator(normalized_row)
+				if expected_generation >= 0 and expected_generation != vehicle_location_query_generation:
+					vehicle_location_refreshing = false
+					call_deferred("_refresh_vehicle_location_view", vehicle_location_query_generation)
+					return
+				var resolved_operator := str(operator_info.get("operator", "")).strip_edges()
+				if resolved_operator != "":
+					normalized_row["tracker_operator"] = resolved_operator
+					normalized_row["tracker_operator_source"] = str(operator_info.get("source", ""))
+					if str(normalized_row.get("operator", "")).strip_edges() == "":
+						normalized_row["operator"] = resolved_operator
 			normalized.append(normalized_row)
-	var source := "API oficial"
+	var source := "API Grupo RS"
 
 	if expected_generation >= 0 and expected_generation != vehicle_location_query_generation:
 		vehicle_location_refreshing = false
@@ -9799,6 +9967,51 @@ func _refresh_vehicle_location_view(expected_generation: int = -1) -> void:
 		return
 	vehicle_location_rows = normalized
 	vehicle_location_source = source
+	if vehicle_location_queue_after_api_success_only and not vehicle_location_pending_queries.is_empty():
+		var processed_pending_keys: Dictionary = {}
+		for processed_query in lookup_queries:
+			processed_pending_keys[_search_key(processed_query)] = true
+		if not normalized.is_empty():
+			for pending_query in lookup_queries:
+				var pending_key := _search_key(pending_query)
+				if pending_query.strip_edges().to_lower().begins_with("cliente:"):
+					if not confirmed_lookup_keys.has(pending_key):
+						continue
+					for client_row in normalized:
+						if not _vehicle_location_api_row_matches_query(client_row, pending_query):
+							continue
+						var confirmed_identity := str(client_row.get("plate", "")).strip_edges()
+						if confirmed_identity == "":
+							confirmed_identity = str(client_row.get("serial", "")).strip_edges()
+						var confirmed_key := _search_key(confirmed_identity)
+						var identity_already_queued := false
+						for queued_identity in vehicle_location_query_queue:
+							if _search_key(queued_identity) == confirmed_key:
+								identity_already_queued = true
+								break
+						if confirmed_key != "" and not identity_already_queued:
+							vehicle_location_query_queue.append(confirmed_identity)
+					continue
+				if confirmed_lookup_keys.has(pending_key):
+					var identity_already_queued := false
+					for queued_identity in vehicle_location_query_queue:
+						if _search_key(queued_identity) == pending_key:
+							identity_already_queued = true
+							break
+					if not identity_already_queued:
+						vehicle_location_query_queue.append(pending_query)
+		# Remova apenas as pendências desta rodada. Uma consulta adicionada
+		# enquanto a API aguardava deve permanecer para a próxima geração.
+		for pending_index in range(vehicle_location_pending_queries.size() - 1, -1, -1):
+			if processed_pending_keys.has(_search_key(vehicle_location_pending_queries[pending_index])):
+				vehicle_location_pending_queries.remove_at(pending_index)
+		_refresh_vehicle_location_queue_ui()
+	vehicle_location_last_query_error_count = api_error_count
+	vehicle_location_last_query_diagnostic["row_count"] = normalized.size()
+	vehicle_location_last_query_diagnostic["exact_match"] = not normalized.is_empty()
+	vehicle_location_last_query_diagnostic["current_generation"] = vehicle_location_query_generation
+	if api_error_count == 0:
+		vehicle_location_last_query_diagnostic["category"] = "found" if not normalized.is_empty() else "not_found"
 	vehicle_location_refreshing = false
 	if vehicle_location_status_label != null and is_instance_valid(vehicle_location_status_label):
 		var has_api_position := false
@@ -9807,13 +10020,58 @@ func _refresh_vehicle_location_view(expected_generation: int = -1) -> void:
 				has_api_position = true
 				break
 		var scope_note := " | localizacao retornada" if has_api_position else " | sem coordenada retornada"
-		if not api_errors.is_empty():
-			scope_note += " | %s" % " ; ".join(api_errors.slice(0, 2))
+		if api_error_count > 0:
+			scope_note += " | falha em %d consulta(s)" % api_error_count
 		vehicle_location_status_label.text = "%s%s | %d registro(s)" % [source, scope_note, normalized.size()]
 		vehicle_location_status_label.add_theme_color_override("font_color", GREEN if has_api_position else ORANGE)
 	if vehicle_location_updated_label != null and is_instance_valid(vehicle_location_updated_label):
 		vehicle_location_updated_label.text = "Atualizado %s" % Time.get_time_string_from_system().substr(0, 5)
 	_apply_vehicle_location_filters()
+
+
+func _vehicle_location_sanitized_diagnostic(
+	result: Dictionary,
+	generation: int,
+	trigger: String,
+	queue_count: int
+) -> Dictionary:
+	var response_code := int(result.get("response_code", 0))
+	var timeout := bool(result.get("timeout", false))
+	var parse_ok := bool(result.get("parse_ok", true))
+	var ok := bool(result.get("ok", false))
+	var not_found := bool(result.get("not_found", false)) or response_code == 404
+	var category := "found" if ok else "network_error"
+	if not_found:
+		category = "not_found"
+	elif timeout:
+		category = "timeout"
+	elif not parse_ok:
+		category = "invalid_json"
+	elif response_code == 401:
+		category = "unauthorized"
+	elif response_code == 403:
+		category = "forbidden"
+	elif str(result.get("state", "")) == "disabled":
+		category = "disabled"
+	elif str(result.get("state", "")) == "not_configured" \
+			or str(result.get("message", "")).contains("Configure as credenciais"):
+		category = "not_configured"
+	elif ok and (result.get("rows", []) as Array).is_empty() and not result.has("location"):
+		category = "not_found"
+	return {
+		"stage": str(result.get("stage", "location")),
+		"category": category,
+		"response_code": response_code,
+		"timeout": timeout,
+		"parse_ok": parse_ok,
+		"row_count": (result.get("rows", []) as Array).size(),
+		"exact_match": false,
+		"relogin_attempted": bool(result.get("relogin_attempted", false)),
+		"generation": generation,
+		"current_generation": vehicle_location_query_generation,
+		"trigger": trigger,
+		"queue_count": queue_count,
+	}
 
 
 func _fetch_grupo_rs_vehicle_location_rows(query: String = "") -> Array[Dictionary]:
@@ -9875,6 +10133,7 @@ func _enrich_vehicle_location_rows(locations: Array[Dictionary], vehicles: Array
 func _apply_vehicle_location_filters() -> void:
 	if vehicle_location_list_body == null or not is_instance_valid(vehicle_location_list_body):
 		return
+	var previous_selected_key := _vehicle_location_row_key(vehicle_location_selected)
 	var current_map_view: Dictionary = {}
 	if vehicle_location_map_canvas != null and is_instance_valid(vehicle_location_map_canvas):
 		current_map_view = vehicle_location_map_canvas.current_map_view()
@@ -9935,6 +10194,12 @@ func _apply_vehicle_location_filters() -> void:
 		if not selected_found:
 			vehicle_location_selected = vehicle_location_integration.select_vehicle(vehicle_location_filtered_rows)
 		_render_vehicle_location_details(vehicle_location_selected)
+	var selected_key_after_filter := _vehicle_location_row_key(vehicle_location_selected)
+	var selection_changed := selected_key_after_filter != "" and selected_key_after_filter != previous_selected_key
+	if selection_changed:
+		# A primeira consulta ou a troca de veículo deve centralizar na nova
+		# coordenada. Atualizações posteriores preservam o enquadramento manual.
+		current_map_view = {}
 	if vehicle_location_map_canvas != null and is_instance_valid(vehicle_location_map_canvas):
 		var map_rows := _vehicle_location_rows_for_map()
 		vehicle_location_map_canvas.set_tracking_mode(true)
@@ -10175,12 +10440,28 @@ func _reload_vehicle_location_map(generation: int, rows: Array, view_override: D
 		if typeof(raw) != TYPE_DICTIONARY:
 			continue
 		var location := raw as Dictionary
-		if not is_zero_approx(float(str(location.get("lat", "0")))) or not is_zero_approx(float(str(location.get("lng", "0")))):
+		var latitude := float(str(location.get("lat", "0")))
+		var longitude := float(str(location.get("lng", "0")))
+		if vehicle_location_integration.valid_coordinates(latitude, longitude):
 			valid_rows.append(location)
 	if valid_rows.is_empty():
-		# Uma resposta sem posição não apaga o mapa nem as ERBs já carregadas.
-		# O estado da API é mostrado na lista/detalhes e nenhum marcador é criado.
+		# Uma resposta sem posição não apaga os marcadores, mas uma navegacao
+		# solicitada pelo usuario ainda precisa carregar a nova area. Antes este
+		# retorno deixava navigation_loading preso para sempre.
+		var empty_view := view_override.duplicate(true)
+		if empty_view.is_empty():
+			empty_view = vehicle_location_map_canvas.current_map_view()
+		if empty_view.is_empty():
+			empty_view = {
+				"center": {"lat": BigMapConfig.DEFAULT_LATITUDE, "lng": BigMapConfig.DEFAULT_LONGITUDE},
+				"zoom": BigMapConfig.DEFAULT_ZOOM,
+				"interactive": true,
+			}
+		await _load_smart_4g_map_tiles(vehicle_location_map_canvas, [], "all", empty_view)
+		if generation != vehicle_location_map_generation or vehicle_location_map_canvas == null or not is_instance_valid(vehicle_location_map_canvas):
+			return
 		vehicle_location_map_canvas.set_station_visibility(true)
+		vehicle_location_map_canvas.set_tracking_mode(true)
 		vehicle_location_map_canvas.set_tracking_locations([])
 		return
 	var view := view_override.duplicate(true)
@@ -13131,10 +13412,12 @@ func _load_smart_4g_map_tiles(
 	canvas: Smart4GMapCanvas,
 	devices: Array,
 	region_id: String = "all",
-	view_override: Dictionary = {}
+	view_override: Dictionary = {},
+	skip_coverage_profile: bool = false
 ) -> void:
 	if canvas == null or not is_instance_valid(canvas):
 		return
+	var load_started_msec := Time.get_ticks_msec()
 	var preserve_current_map := bool(view_override.get("interactive", false))
 	var load_generation := canvas.begin_map_load(
 		"Atualizando mapa e torres Anatel..." if preserve_current_map else "Montando mapa e torres Anatel...",
@@ -13142,9 +13425,14 @@ func _load_smart_4g_map_tiles(
 	)
 	await get_tree().process_frame
 	await get_tree().process_frame
+	if preserve_current_map:
+		# A câmera já respondeu no canvas; somente o IO espera esta janela curta
+		# para coalescer rodas/arrastes sucessivos em um único destino.
+		await get_tree().create_timer(SMART_4G_NAVIGATION_IO_DEBOUNCE_SECONDS).timeout
 	if canvas == null \
 			or not is_instance_valid(canvas) \
 			or not canvas.is_load_current(load_generation):
+		smart_4g_tile_cancelled_load_count += 1
 		return
 	var typed_devices := _smart_4g_typed_devices(devices)
 	var viewport_size := Vector2i(
@@ -13174,6 +13462,7 @@ func _load_smart_4g_map_tiles(
 		floori(float(top_left.y + viewport_size.y - 1) / float(tile_size))
 	)
 	var max_tile := int(pow(2.0, float(zoom)))
+	var basemap_id := str(canvas.get("basemap_id"))
 	var loaded_tiles := 0
 	var total_tiles := maxi(
 		1,
@@ -13186,11 +13475,13 @@ func _load_smart_4g_map_tiles(
 			continue
 		for tile_x in range(first_tile.x, last_tile.x + 1):
 			var wrapped_x := posmod(tile_x, max_tile)
-			var cache_key := BigMapTileProvider.cache_key(zoom, wrapped_x, tile_y)
+			var cache_key := BigMapTileProvider.cache_key(zoom, wrapped_x, tile_y, basemap_id)
 			var entry := {"key": cache_key, "x": tile_x, "y": tile_y}
 			var cached_bytes: Variant = smart_4g_tile_cache.get(cache_key, PackedByteArray())
 			if cached_bytes is PackedByteArray and not (cached_bytes as PackedByteArray).is_empty():
-				var cached_texture := _smart_4g_osm_tile_texture(cached_bytes as PackedByteArray)
+				smart_4g_tile_cache_hit_count += 1
+				_smart_4g_touch_tile_cache_key(cache_key)
+				var cached_texture := _smart_4g_osm_tile_texture(cache_key, cached_bytes as PackedByteArray)
 				if cached_texture != null:
 					entry["texture"] = cached_texture
 					loaded_tiles += 1
@@ -13202,16 +13493,20 @@ func _load_smart_4g_map_tiles(
 	if canvas == null \
 			or not is_instance_valid(canvas) \
 			or not canvas.is_load_current(load_generation):
+		smart_4g_tile_cancelled_load_count += 1
 		return
-	# Move the view immediately. Only missing tiles are downloaded below.
-	canvas.set_map_view(
-		tile_entries,
-		zoom,
-		Vector2(top_left),
-		Vector2(viewport_size),
-		loaded_tiles,
-		total_tiles
-	)
+	# Em uma nova grade sem sobreposição, mantém o mapa anterior visível até o
+	# primeiro tile novo chegar. Isso evita o clarão/vazio durante zoom e pan.
+	var view_started := not preserve_current_map or loaded_tiles > 0
+	if view_started:
+		canvas.set_map_view(
+			tile_entries,
+			zoom,
+			Vector2(top_left),
+			Vector2(viewport_size),
+			loaded_tiles,
+			total_tiles
+		)
 	canvas.set_map_tile_progress(
 		loaded_tiles,
 		total_tiles,
@@ -13222,6 +13517,12 @@ func _load_smart_4g_map_tiles(
 			"next_index": 0,
 			"loaded": loaded_tiles,
 			"active": mini(SMART_4G_TILE_CONCURRENCY, missing_tiles.size()),
+			"view_started": view_started,
+			"entries": tile_entries,
+			"top_left": Vector2(top_left),
+			"viewport_size": Vector2(viewport_size),
+			"load_started_msec": load_started_msec,
+			"first_tile_msec": Time.get_ticks_msec() - load_started_msec if loaded_tiles > 0 else -1,
 		}
 		var tile_workers := int(tile_state.get("active", 0))
 		for worker_index in range(tile_workers):
@@ -13233,20 +13534,33 @@ func _load_smart_4g_map_tiles(
 				max_tile,
 				load_generation,
 				total_tiles,
+				basemap_id,
 				tile_state
 			)
 		while int(tile_state.get("active", 0)) > 0:
 			await get_tree().create_timer(0.05).timeout
 		loaded_tiles = int(tile_state.get("loaded", loaded_tiles))
+		view_started = bool(tile_state.get("view_started", view_started))
+		smart_4g_tile_last_first_tile_msec = int(tile_state.get("first_tile_msec", -1))
+	else:
+		smart_4g_tile_last_first_tile_msec = Time.get_ticks_msec() - load_started_msec
 	if canvas == null \
 			or not is_instance_valid(canvas) \
 			or not canvas.is_load_current(load_generation):
+		smart_4g_tile_cancelled_load_count += 1
 		return
 	if loaded_tiles <= 0:
 		if preserve_current_map:
 			canvas.cancel_navigation_load("Nao foi possivel abrir a nova area.")
 		else:
 			canvas.set_map_error("Mapa indisponivel. Verifique a conexao.")
+		return
+	smart_4g_tile_last_load_msec = Time.get_ticks_msec() - load_started_msec
+	smart_4g_tile_last_total_count = total_tiles
+	smart_4g_tile_last_reused_count = total_tiles - missing_tiles.size()
+	smart_4g_tile_last_missing_count = missing_tiles.size()
+	if skip_coverage_profile:
+		canvas.finish_map_tile_load(loaded_tiles, total_tiles)
 		return
 	canvas.set_loading_stage("Atualizando posicoes das torres Anatel...", preserve_current_map)
 	await get_tree().process_frame
@@ -13261,6 +13575,7 @@ func _load_smart_4g_map_tiles(
 	if canvas == null \
 			or not is_instance_valid(canvas) \
 			or not canvas.is_load_current(load_generation):
+		smart_4g_tile_cancelled_load_count += 1
 		return
 	if bool(navigation_profile.get("ok", false)):
 		canvas.set_coverage_profile(navigation_profile)
@@ -13274,6 +13589,7 @@ func _smart_4g_map_tile_worker(
 	max_tile: int,
 	load_generation: int,
 	total_tiles: int,
+	basemap_id: String,
 	state: Dictionary
 ) -> void:
 	while true:
@@ -13291,15 +13607,37 @@ func _smart_4g_map_tile_worker(
 		var response := await _smart_4g_osm_tile_bytes(
 			zoom,
 			int(posmod(int(entry.get("x", 0)), max_tile)),
-			int(entry.get("y", 0))
+			int(entry.get("y", 0)),
+			basemap_id,
+			canvas,
+			load_generation
 		)
 		if canvas == null \
 				or not is_instance_valid(canvas) \
 				or not canvas.is_load_current(load_generation):
 			state["active"] = maxi(int(state.get("active", 1)) - 1, 0)
 			return
-		var tile_texture := _smart_4g_osm_tile_texture(response.get("bytes", PackedByteArray())) if bool(response.get("ok", false)) else null
+		var tile_texture := await _smart_4g_osm_tile_texture_async(
+			str(entry.get("key", "")),
+			response.get("bytes", PackedByteArray())
+		) if bool(response.get("ok", false)) else null
+		if canvas == null \
+				or not is_instance_valid(canvas) \
+				or not canvas.is_load_current(load_generation):
+			state["active"] = maxi(int(state.get("active", 1)) - 1, 0)
+			return
 		if tile_texture != null:
+			if not bool(state.get("view_started", false)):
+				canvas.set_map_view(
+					state.get("entries", []) as Array[Dictionary],
+					zoom,
+					state.get("top_left", Vector2.ZERO) as Vector2,
+					state.get("viewport_size", Vector2.ZERO) as Vector2,
+					0,
+					total_tiles
+				)
+				state["view_started"] = true
+				state["first_tile_msec"] = Time.get_ticks_msec() - int(state.get("load_started_msec", Time.get_ticks_msec()))
 			canvas.set_map_tile(str(entry.get("key", "")), int(entry.get("x", 0)), int(entry.get("y", 0)), tile_texture)
 			state["loaded"] = int(state.get("loaded", 0)) + 1
 		canvas.set_map_tile_progress(
@@ -13309,26 +13647,159 @@ func _smart_4g_map_tile_worker(
 		)
 
 
-func _smart_4g_osm_tile_bytes(zoom: int, tile_x: int, tile_y: int) -> Dictionary:
-	var cache_key := BigMapTileProvider.cache_key(zoom, tile_x, tile_y)
+func _smart_4g_touch_tile_cache_key(cache_key: String) -> void:
+	if cache_key == "" or not smart_4g_tile_cache.has(cache_key):
+		return
+	while smart_4g_tile_cache_order.has(cache_key):
+		smart_4g_tile_cache_order.erase(cache_key)
+	smart_4g_tile_cache_order.append(cache_key)
+
+
+func _smart_4g_osm_tile_bytes(
+	zoom: int,
+	tile_x: int,
+	tile_y: int,
+	basemap_id: String = BigMapConfig.BASEMAP_NORMAL,
+	canvas: Smart4GMapCanvas = null,
+	load_generation: int = -1
+) -> Dictionary:
+	var cache_key := BigMapTileProvider.cache_key(zoom, tile_x, tile_y, basemap_id)
 	if smart_4g_tile_cache.has(cache_key):
+		smart_4g_tile_cache_hit_count += 1
+		_smart_4g_touch_tile_cache_key(cache_key)
 		return {
 			"ok": true,
 			"bytes": smart_4g_tile_cache.get(cache_key, PackedByteArray()),
 		}
-	var response := await _http_get_bytes(BigMapTileProvider.tile_url(zoom, tile_x, tile_y))
+	smart_4g_tile_network_request_count += 1
+	var tile_url := BigMapTileProvider.tile_url(zoom, tile_x, tile_y, basemap_id)
+	var response := (
+		await _smart_4g_tile_http_bytes(tile_url, canvas, load_generation)
+		if canvas != null and load_generation >= 0
+		else await _http_get_bytes(tile_url)
+	)
 	if not bool(response.get("ok", false)):
 		return response
 	smart_4g_tile_cache[cache_key] = response.get("bytes", PackedByteArray())
-	smart_4g_tile_cache_order.append(cache_key)
-	while smart_4g_tile_cache_order.size() > 160:
+	_smart_4g_touch_tile_cache_key(cache_key)
+	while smart_4g_tile_cache_order.size() > SMART_4G_TILE_CACHE_LIMIT:
 		var expired_key: String = smart_4g_tile_cache_order.pop_front()
 		smart_4g_tile_cache.erase(expired_key)
+		smart_4g_tile_texture_cache.erase(expired_key)
+		smart_4g_tile_cache_eviction_count += 1
 	return response
 
 
-func _smart_4g_osm_tile_texture(bytes: PackedByteArray) -> Texture2D:
-	return BigMapTileProvider.texture_from_png(bytes)
+func _smart_4g_tile_http_bytes(
+	url: String,
+	canvas: Smart4GMapCanvas,
+	load_generation: int
+) -> Dictionary:
+	var request := HTTPRequest.new()
+	request.timeout = 15.0
+	add_child(request)
+	var state := {"done": false, "result": HTTPRequest.RESULT_CONNECTION_ERROR, "response_code": 0, "bytes": PackedByteArray()}
+	request.request_completed.connect(func(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+		state["done"] = true
+		state["result"] = result
+		state["response_code"] = response_code
+		state["bytes"] = body
+	)
+	var start_error := request.request(url, ["User-Agent: GrupoRSCentral/1.0"])
+	if start_error != OK:
+		request.queue_free()
+		return {"ok": false, "bytes": PackedByteArray(), "result": start_error, "response_code": 0}
+	while not bool(state.get("done", false)):
+		await (Engine.get_main_loop() as SceneTree).process_frame
+		if canvas == null or not is_instance_valid(canvas) or not canvas.is_load_current(load_generation):
+			request.cancel_request()
+			request.queue_free()
+			smart_4g_tile_cancelled_http_count += 1
+			return {"ok": false, "bytes": PackedByteArray(), "result": HTTPRequest.RESULT_CONNECTION_ERROR, "response_code": 0, "cancelled": true}
+	request.queue_free()
+	var result := int(state.get("result", HTTPRequest.RESULT_CONNECTION_ERROR))
+	var response_code := int(state.get("response_code", 0))
+	var body := state.get("bytes", PackedByteArray()) as PackedByteArray
+	if result != HTTPRequest.RESULT_SUCCESS or response_code < 200 or response_code >= 300:
+		return {"ok": false, "bytes": PackedByteArray(), "result": result, "response_code": response_code}
+	return {"ok": true, "bytes": body, "result": result, "response_code": response_code}
+
+
+func _smart_4g_osm_tile_texture(cache_key: String, bytes: PackedByteArray) -> Texture2D:
+	var cached: Texture2D = smart_4g_tile_texture_cache.get(cache_key) as Texture2D
+	if cached != null:
+		_smart_4g_touch_tile_cache_key(cache_key)
+		return cached
+	var texture := BigMapTileProvider.texture_from_png(bytes)
+	if texture != null and cache_key != "" and smart_4g_tile_cache.has(cache_key):
+		smart_4g_tile_texture_cache[cache_key] = texture
+		smart_4g_tile_decode_count += 1
+	return texture
+
+
+func _smart_4g_osm_tile_texture_async(cache_key: String, bytes: PackedByteArray) -> Texture2D:
+	var cached: Texture2D = smart_4g_tile_texture_cache.get(cache_key) as Texture2D
+	if cached != null:
+		_smart_4g_touch_tile_cache_key(cache_key)
+		return cached
+	var decode_started_msec := Time.get_ticks_msec()
+	var decode_state := {}
+	var task_id := WorkerThreadPool.add_task(
+		Callable(self, "_smart_4g_decode_tile_image_to").bind(bytes, decode_state),
+		true,
+		"Mapa Grande: decodificar tile OSM"
+	)
+	while not WorkerThreadPool.is_task_completed(task_id):
+		await (Engine.get_main_loop() as SceneTree).process_frame
+	WorkerThreadPool.wait_for_task_completion(task_id)
+	var decode_msec := Time.get_ticks_msec() - decode_started_msec
+	smart_4g_tile_decode_total_msec += decode_msec
+	smart_4g_tile_decode_max_msec = maxi(smart_4g_tile_decode_max_msec, decode_msec)
+	# A LRU pode ter removido os bytes enquanto o worker decodificava. Nunca
+	# deixe uma textura sem a chave correspondente no cache principal.
+	if cache_key == "" or not smart_4g_tile_cache.has(cache_key):
+		return null
+	var tile_image: Image = decode_state.get("image") as Image
+	var texture := BigMapTileProvider.texture_from_image(tile_image)
+	if texture != null and cache_key != "":
+		smart_4g_tile_texture_cache[cache_key] = texture
+		smart_4g_tile_decode_count += 1
+	return texture
+
+
+func _smart_4g_decode_tile_image_to(bytes: PackedByteArray, result_target: Dictionary) -> void:
+	result_target["image"] = BigMapTileProvider.image_from_bytes(bytes)
+
+
+func _smart_4g_tile_cache_state() -> Dictionary:
+	var source_bytes := 0
+	var orphan_textures := 0
+	for value in smart_4g_tile_cache.values():
+		if value is PackedByteArray:
+			source_bytes += (value as PackedByteArray).size()
+	for texture_key in smart_4g_tile_texture_cache.keys():
+		if not smart_4g_tile_cache.has(texture_key):
+			orphan_textures += 1
+	return {
+		"entries": smart_4g_tile_cache.size(),
+		"texture_entries": smart_4g_tile_texture_cache.size(),
+		"source_bytes": source_bytes,
+		"max_entries": SMART_4G_TILE_CACHE_LIMIT,
+		"network_requests": smart_4g_tile_network_request_count,
+		"cache_hits": smart_4g_tile_cache_hit_count,
+		"decodes": smart_4g_tile_decode_count,
+		"evictions": smart_4g_tile_cache_eviction_count,
+		"cancelled_loads": smart_4g_tile_cancelled_load_count,
+		"last_load_msec": smart_4g_tile_last_load_msec,
+		"last_first_tile_msec": smart_4g_tile_last_first_tile_msec,
+		"last_total_tiles": smart_4g_tile_last_total_count,
+		"last_reused_tiles": smart_4g_tile_last_reused_count,
+		"last_missing_tiles": smart_4g_tile_last_missing_count,
+		"cancelled_http": smart_4g_tile_cancelled_http_count,
+		"decode_total_msec": smart_4g_tile_decode_total_msec,
+		"decode_max_msec": smart_4g_tile_decode_max_msec,
+		"orphan_textures": orphan_textures,
+	}
 
 
 func _build_smart_4g_map_profile(
@@ -20817,7 +21288,7 @@ func _grupo_rs_api_login_with_credentials(username: String, password: String) ->
 		grupo_rs_api_last_error = "Configure as credenciais da API do Grupo RS novo."
 		grupo_rs_api_last_failure_at = int(Time.get_unix_time_from_system())
 		grupo_rs_api_health_state = "not_configured"
-		return {"ok": false, "message": grupo_rs_api_last_error}
+		return {"ok": false, "message": grupo_rs_api_last_error, "state": "not_configured", "stage": "auth"}
 
 	var response := await _sga_http_post_json(
 		_grupo_rs_api_url("/endpoints/v1/auth/login.php"),
@@ -20829,7 +21300,7 @@ func _grupo_rs_api_login_with_credentials(username: String, password: String) ->
 		grupo_rs_api_last_error = "API Grupo RS recusou o login" if code == 401 else "API Grupo RS indisponivel"
 		grupo_rs_api_last_failure_at = int(Time.get_unix_time_from_system())
 		grupo_rs_api_health_state = "reconnecting"
-		return {"ok": false, "message": grupo_rs_api_last_error, "response_code": code}
+		return {"ok": false, "message": grupo_rs_api_last_error, "response_code": code, "stage": "auth"}
 
 	var parsed: Variant = JSON.parse_string(str(response.get("body", "")))
 	var token := _grupo_rs_api_find_token(parsed)
@@ -20837,7 +21308,7 @@ func _grupo_rs_api_login_with_credentials(username: String, password: String) ->
 		grupo_rs_api_last_error = "API Grupo RS respondeu sem token JWT."
 		grupo_rs_api_last_failure_at = int(Time.get_unix_time_from_system())
 		grupo_rs_api_health_state = "reconnecting"
-		return {"ok": false, "message": grupo_rs_api_last_error}
+		return {"ok": false, "message": grupo_rs_api_last_error, "stage": "auth", "parse_ok": false}
 
 	grupo_rs_api_token = token
 	grupo_rs_api_logged_in = true
@@ -20989,6 +21460,7 @@ func _grupo_rs_api_get(path: String, retry_login: bool = true, force_read: bool 
 	if not grupo_rs_api_logged_in or grupo_rs_api_token.strip_edges() == "":
 		var login := await _grupo_rs_api_login()
 		if not bool(login.get("ok", false)):
+			login["stage"] = "auth"
 			return login
 
 	var response := await _http_get_text_with_headers(_grupo_rs_api_url(path), _grupo_rs_api_headers())
@@ -20999,7 +21471,13 @@ func _grupo_rs_api_get(path: String, retry_login: bool = true, force_read: bool 
 		grupo_rs_api_token = ""
 		var relogin := await _grupo_rs_api_login()
 		if bool(relogin.get("ok", false)):
-			return await _grupo_rs_api_get(path, false, force_read)
+			var retried := await _grupo_rs_api_get(path, false, force_read)
+			retried["relogin_attempted"] = true
+			return retried
+		relogin["stage"] = "auth"
+		relogin["relogin_attempted"] = true
+		return relogin
+	response["relogin_attempted"] = false
 	return response
 
 
@@ -21640,17 +22118,34 @@ func _grupo_rs_api_numeric_string_value(data: Dictionary, keys: Array[String]) -
 
 func _grupo_rs_api_normalize_location(raw: Dictionary) -> Dictionary:
 	var data := raw.duplicate(true)
-	for key in ["localizacao", "location", "posicao", "ultima_localizacao", "last_location"]:
+	for key in [
+		"localizacao", "location", "posicao", "position",
+		"ultima_localizacao", "ultima_posicao", "ultimaPosicao",
+		"last_location", "lastPosition", "telemetria", "telemetry",
+		"dados", "coordenadas", "coordinates"
+	]:
 		var nested: Variant = raw.get(key)
 		if typeof(nested) != TYPE_DICTIONARY:
 			continue
 		for nested_key in (nested as Dictionary).keys():
 			if not data.has(nested_key):
 				data[nested_key] = (nested as Dictionary).get(nested_key)
-	var decoded: Dictionary = ST310DecoderScript.decode_api_row(raw)
+	var decoded: Dictionary = ST310DecoderScript.decode_api_row(data)
 	var decoded_coordinates: Dictionary = decoded.get("coordinates", {}) as Dictionary
 	var decoded_lat := str(decoded_coordinates.get("lat", ""))
 	var decoded_lng := str(decoded_coordinates.get("lng", ""))
+	var coordinate_input_present := false
+	for coordinate_key in [
+		"latitude", "Latitude", "lat", "LAT", "gps_lat", "gpsLatitude",
+		"longitude", "Longitude", "lng", "lon", "LNG", "gps_lng", "gpsLongitude"
+	]:
+		if data.has(coordinate_key) and data.get(coordinate_key) != null and str(data.get(coordinate_key)).strip_edges() != "":
+			coordinate_input_present = true
+			break
+	var coordinate_state := (
+		"valid" if bool(decoded.get("coordinates_valid", false))
+		else ("invalid" if coordinate_input_present else "missing")
+	)
 	return {
 		"raw": raw.duplicate(true),
 	"decoder": decoded,
@@ -21658,6 +22153,7 @@ func _grupo_rs_api_normalize_location(raw: Dictionary) -> Dictionary:
 	"decoder_kind": str(decoded.get("kind", "communication")),
 	"decoder_message": str(decoded.get("message", "")),
 	"coordinates_valid": bool(decoded.get("coordinates_valid", false)),
+	"coordinate_state": coordinate_state,
 		"serial": _grupo_rs_api_serial_from_row(data),
 		"plate": _format_grupo_rs_vehicle_plate_for_display(_grupo_rs_api_string_value(data, ["placa", "plate", "Placa"])),
 		"client": _grupo_rs_api_string_value(data, ["cliente", "client", "Cliente", "nomeCliente", "nomeClienteTitular", "NomeClienteTitular", "clienteTitular", "ClienteTitular"]),
@@ -22322,10 +22818,28 @@ func _grupo_rs_api_find_location(serial: String, plate: String, vehicle_id: Stri
 			true
 		)
 		if not bool(direct_response.get("ok", false)):
+			if int(direct_response.get("response_code", 0)) == 404:
+				return {
+					"ok": true,
+					"location": {},
+					"not_found": true,
+					"stage": "location",
+					"response_code": 404,
+					"parse_ok": true,
+					"row_count": 0,
+				}
+			direct_response["stage"] = "auth" if int(direct_response.get("response_code", 0)) == 401 else "location"
+			direct_response["parse_ok"] = true
 			return direct_response
 		var direct_payload: Variant = JSON.parse_string(str(direct_response.get("body", "")))
 		if direct_payload == null:
-			return {"ok": false, "message": "A API retornou JSON invalido para a localizacao consultada."}
+			return {
+				"ok": false,
+				"message": "A API retornou JSON invalido para a localizacao consultada.",
+				"stage": "location_parse",
+				"response_code": int(direct_response.get("response_code", 0)),
+				"parse_ok": false,
+			}
 		var direct_rows: Array[Dictionary] = []
 		for raw in _grupo_rs_api_extract_rows(direct_payload):
 			direct_rows.append(_grupo_rs_api_normalize_location(raw))
@@ -22337,11 +22851,35 @@ func _grupo_rs_api_find_location(serial: String, plate: String, vehicle_id: Stri
 			var matches_serial := requested_serial != "" and _search_key(str(location.get("serial", ""))) == requested_serial
 			var matches_plate := requested_plate != "" and _normalize_location_plate(str(location.get("plate", ""))) == requested_plate
 			if matches_vehicle or matches_serial or matches_plate:
-				return {"ok": true, "location": location, "direct": true}
+				return {
+					"ok": true,
+					"location": location,
+					"direct": true,
+					"stage": "location",
+					"response_code": int(direct_response.get("response_code", 0)),
+					"parse_ok": true,
+					"row_count": direct_rows.size(),
+				}
 		if direct_rows.is_empty():
-			return {"ok": false, "message": "API Grupo RS nao localizou o veiculo consultado."}
+			return {
+				"ok": true,
+				"location": {},
+				"not_found": true,
+				"stage": "location",
+				"response_code": int(direct_response.get("response_code", 0)),
+				"parse_ok": true,
+				"row_count": 0,
+			}
 		if not allow_full_scan:
-			return {"ok": false, "message": "A API nao confirmou a localizacao pela consulta direta.", "not_found": true}
+			return {
+				"ok": true,
+				"location": {},
+				"not_found": true,
+				"stage": "location",
+				"response_code": int(direct_response.get("response_code", 0)),
+				"parse_ok": true,
+				"row_count": direct_rows.size(),
+			}
 
 	# Fallback for older API deployments that do not implement q filtering.
 	var result := await _grupo_rs_api_fetch_locations(true)
@@ -22360,7 +22898,14 @@ func _grupo_rs_api_find_location(serial: String, plate: String, vehicle_id: Stri
 			return {"ok": true, "location": location}
 		if plate_key != "" and _normalize_location_plate(str(location.get("plate", ""))) == plate_key:
 			return {"ok": true, "location": location}
-	return {"ok": false, "message": "API Grupo RS nao localizou o veiculo consultado."}
+	return {
+		"ok": true,
+		"location": {},
+		"not_found": true,
+		"stage": "location_fallback",
+		"parse_ok": true,
+		"row_count": 0,
+	}
 
 
 func _grupo_rs_api_latest_event(vehicle_id: String, reference_datetime: String) -> Dictionary:

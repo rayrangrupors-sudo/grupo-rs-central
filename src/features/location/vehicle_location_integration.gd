@@ -9,6 +9,13 @@ const GeoProjection := preload("res://src/features/big_map/map_projection.gd")
 
 var request_generation := 0
 
+const QUERY_KIND_PLATE := "plate"
+const QUERY_KIND_SERIAL := "serial"
+const QUERY_KIND_CLIENT := "client"
+const QUERY_ALLOWED_CHARACTERS := "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+const QUERY_LETTERS := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const QUERY_DIGITS := "0123456789"
+
 
 func begin_request() -> int:
 	request_generation += 1
@@ -20,6 +27,8 @@ func is_current(generation: int) -> bool:
 
 
 func select_vehicle(rows: Array, preferred_key: String = "") -> Dictionary:
+	## Seleção visual tolerante: preserva o comportamento legado de usar a
+	## primeira linha quando não existe uma preferência. Não usar como busca.
 	var preferred := preferred_key.strip_edges().to_lower()
 	var fallback: Dictionary = {}
 	for value in rows:
@@ -33,6 +42,119 @@ func select_vehicle(rows: Array, preferred_key: String = "") -> Dictionary:
 				if str(row.get(field, "")).strip_edges().to_lower() == preferred:
 					return row
 	return fallback
+
+
+func normalize_location_query(value: String) -> String:
+	## Placas formatadas e séries são comparadas sem máscara, espaços ou caixa.
+	## Somente caracteres ASCII alfanuméricos entram na chave de correspondência.
+	var normalized := ""
+	var upper := value.strip_edges().to_upper()
+	for index in range(upper.length()):
+		var character := upper.substr(index, 1)
+		if QUERY_ALLOWED_CHARACTERS.contains(character):
+			normalized += character
+	return normalized
+
+
+func describe_location_query(value: String) -> Dictionary:
+	var normalized := normalize_location_query(value)
+	return {
+		"normalized": normalized,
+		"kind": QUERY_KIND_PLATE if _looks_like_brazilian_plate(normalized) else QUERY_KIND_SERIAL,
+		"valid": normalized.length() >= 2,
+	}
+
+
+func row_matches_exact_query(row: Dictionary, query: String) -> bool:
+	var descriptor := describe_location_query(query)
+	var expected := str(descriptor.get("normalized", ""))
+	if not bool(descriptor.get("valid", false)):
+		return false
+	return _row_matches_normalized_fields(row, expected, _plate_fields()) \
+			or _row_matches_normalized_fields(row, expected, _serial_fields())
+
+
+func find_exact_vehicle_result(rows: Array, query: String) -> Dictionary:
+	var descriptor := describe_location_query(query)
+	var expected := str(descriptor.get("normalized", ""))
+	if not bool(descriptor.get("valid", false)):
+		return {"found": false, "ambiguous": false, "row": {}}
+	var plate_matches: Array[Dictionary] = []
+	var serial_matches: Array[Dictionary] = []
+	for value in rows:
+		if typeof(value) != TYPE_DICTIONARY:
+			continue
+		var row := value as Dictionary
+		if _row_matches_normalized_fields(row, expected, _plate_fields()):
+			plate_matches.append(row)
+		if _row_matches_normalized_fields(row, expected, _serial_fields()):
+			serial_matches.append(row)
+	var unique_matches: Array[Dictionary] = []
+	var seen: Dictionary = {}
+	for row in plate_matches + serial_matches:
+		var key := _stable_row_key(row)
+		if not seen.has(key):
+			seen[key] = true
+			unique_matches.append(row)
+	if unique_matches.size() != 1:
+		return {
+			"found": false,
+			"ambiguous": unique_matches.size() > 1,
+			"row": {},
+			"plate_matches": plate_matches.size(),
+			"serial_matches": serial_matches.size(),
+		}
+	return {
+		"found": true,
+		"ambiguous": false,
+		"row": unique_matches[0].duplicate(true),
+		"match_kind": "both" if not plate_matches.is_empty() and not serial_matches.is_empty() else ("plate" if not plate_matches.is_empty() else "serial"),
+	}
+
+
+func find_exact_vehicle(rows: Array, query: String) -> Dictionary:
+	## Busca estrita: ausência de correspondência retorna vazio e jamais usa a
+	## primeira linha como fallback.
+	return (find_exact_vehicle_result(rows, query).get("row", {}) as Dictionary).duplicate(true)
+
+
+func _plate_fields() -> Array[String]:
+	return ["plate", "placa", "Placa"]
+
+
+func _serial_fields() -> Array[String]:
+	return [
+		"serial", "serie", "série", "numero_serie", "numeroSerie",
+		"equipment_serial", "equipment_number", "equipment_id",
+	]
+
+
+func _row_matches_normalized_fields(row: Dictionary, expected: String, fields: Array[String]) -> bool:
+	for field in fields:
+		var candidate := normalize_location_query(str(row.get(field, "")))
+		if candidate != "" and candidate == expected:
+			return true
+	return false
+
+
+func _stable_row_key(row: Dictionary) -> String:
+	for field in ["vehicle_id", "equipment_id", "serial", "plate"]:
+		var value := normalize_location_query(str(row.get(field, "")))
+		if value != "":
+			return "%s:%s" % [field, value]
+	return "row:%s" % JSON.stringify(row)
+
+
+func _looks_like_brazilian_plate(value: String) -> bool:
+	if value.length() != 7:
+		return false
+	return QUERY_LETTERS.contains(value.substr(0, 1)) \
+			and QUERY_LETTERS.contains(value.substr(1, 1)) \
+			and QUERY_LETTERS.contains(value.substr(2, 1)) \
+			and QUERY_DIGITS.contains(value.substr(3, 1)) \
+			and QUERY_ALLOWED_CHARACTERS.contains(value.substr(4, 1)) \
+			and QUERY_DIGITS.contains(value.substr(5, 1)) \
+			and QUERY_DIGITS.contains(value.substr(6, 1))
 
 
 func map_device(location: Dictionary) -> Dictionary:

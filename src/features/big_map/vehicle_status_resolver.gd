@@ -17,8 +17,10 @@ static func resolve(
 		return apply_state(location, "Sem posição", colors.get("unknown", Color("#8b98a6")))
 	if str(location.get("updated_at", "")).strip_edges() == "" or hours_since_update < 0.0:
 		return apply_state(location, "Sem comunicação", colors.get("unknown", Color("#8b98a6")))
-	var stale_limit_hours := (5.0 / 60.0) if ignition_state == 1 else 2.0
-	if hours_since_update >= stale_limit_hours:
+	# A plataforma de referencia trata a posicao como desatualizada somente
+	# depois de 24 horas. O mesmo limite precisa alimentar agulha, tabela e
+	# detalhes para que um veiculo parado por algumas horas nao fique amarelo.
+	if hours_since_update >= 24.0:
 		return apply_state(location, "Desatualizado", colors.get("stale", Color("#f2b233")))
 	if ignition_state == 1:
 		return apply_state(location, "Ligado", colors.get("on", Color("#16a673")))
