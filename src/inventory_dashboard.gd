@@ -29496,7 +29496,7 @@ func _assistant_seed_chat() -> void:
 		subject_text = "aparelhos, placas, operadoras, manutencoes, Bat. Int, SMS automatico e saude da plataforma"
 	assistant_chat_messages.append({
 		"role": "assistant",
-		"text": "Pode perguntar sobre %s. Se eu nao achar nos dados online, tento pesquisar fora; se ainda assim nao resolver, gero um chamado para Codex com o contexto." % subject_text,
+		"text": "Pode perguntar sobre %s. Nesta versao, a Luna responde somente com o contexto local autorizado; se nao houver resposta, eu aviso isso de forma direta." % subject_text,
 	})
 
 
@@ -29588,7 +29588,7 @@ func _assistant_answer_question(question: String) -> String:
 	var local_answer := _assistant_local_answer(question)
 	if local_answer.strip_edges() != "":
 		return local_answer
-	return await _assistant_web_answer(question)
+	return "Nao encontrei resposta local para esta pergunta. A versao atual da Luna nao usa pesquisa web automatica."
 
 
 func _assistant_local_answer(question: String) -> String:
@@ -31945,6 +31945,7 @@ func _build_config_updates_section(stack: VBoxContainer, settings: Dictionary) -
 	update_install_button.disabled = true
 	actions.add_child(update_install_button)
 	actions.add_child(_make_action_button("Abrir pasta", Color("#eef3f8"), BORDER, BLUE_DARK, Vector2(140, 44), _open_app_update_folder))
+	actions.add_child(_make_action_button("Exportar relatório", Color("#eef3f8"), BORDER, BLUE_DARK, Vector2(170, 44), _request_export_update_report_xlsx))
 
 	var lifecycle_actions := HBoxContainer.new()
 	lifecycle_actions.add_theme_constant_override("separation", 10)
@@ -31993,6 +31994,63 @@ func _build_config_updates_section(stack: VBoxContainer, settings: Dictionary) -
 
 func _update_bootstrap() -> Node:
 	return get_node_or_null("/root/UpdateBootstrap")
+
+
+func _request_export_update_report_xlsx() -> void:
+	_confirm_action(
+		"Exportar atualizações",
+		"Deseja exportar o relatório estruturado das atualizações para XLSX?",
+		_export_update_report_xlsx
+	)
+
+
+func _export_update_report_xlsx() -> void:
+	var bootstrap := _update_bootstrap()
+	if bootstrap == null:
+		_show_error("Exportar atualizações", "O carregador de atualizações não está disponível.")
+		return
+	var events: Array = bootstrap.call("update_log_snapshot", 0)
+	if events.is_empty():
+		_show_warning("Exportar atualizações", "Ainda não há eventos de atualização para exportar.")
+		return
+
+	var rows: Array = [[
+		"Data e hora",
+		"Operação",
+		"Estado",
+		"Mensagem",
+		"Versão-base",
+		"Versão atual",
+		"Versão candidata",
+		"Versão com falha",
+		"SHA-256",
+		"Tamanho (bytes)",
+	]]
+	for raw_event in events:
+		if typeof(raw_event) != TYPE_DICTIONARY:
+			continue
+		var event: Dictionary = raw_event as Dictionary
+		rows.append([
+			_format_datetime(str(event.get("timestamp", ""))),
+			str(event.get("operation", "")),
+			str(event.get("status", "")),
+			str(event.get("message", "")),
+			str(event.get("base_version", "")),
+			str(event.get("current_version", "")),
+			str(event.get("candidate_version", "")),
+			str(event.get("failed_version", "")),
+			str(event.get("sha256", "")),
+			int(event.get("size", 0)),
+		])
+
+	if rows.size() <= 1:
+		_show_warning("Exportar atualizações", "Nenhum evento válido foi encontrado para exportar.")
+		return
+	var path := _downloads_export_path("relatorio_atualizacoes.xlsx")
+	if not _write_xlsx(path, "Atualizações", rows):
+		_show_error("Exportar atualizações", "Não foi possível criar o relatório XLSX.")
+		return
+	_show_success("Exportar atualizações", "Relatório exportado em XLSX:\n%s" % path)
 
 
 func _update_state_dictionary(state: Dictionary, key: String) -> Dictionary:

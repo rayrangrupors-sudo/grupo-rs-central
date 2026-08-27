@@ -2,12 +2,18 @@ extends Node
 
 const APP_ID := "grupo-rs-central"
 const STATE_PATH := "user://updates/update_state.json"
+const UPDATE_LOG_PATH := "user://updates/update_log.json"
+const UPDATE_REPORT_PATH := "user://updates/update_report.json"
 const UPDATE_DIR := "user://updates"
 const DOWNLOAD_CHUNK_SIZE := 1024 * 1024
+const UPDATE_LOG_SCHEMA_VERSION := 1
 
 var _state_path := STATE_PATH
+var _update_log_path := UPDATE_LOG_PATH
+var _update_report_path := UPDATE_REPORT_PATH
 var _update_dir := UPDATE_DIR
 var _state: Dictionary = {}
+var _update_log: Array = []
 var _available_manifest: Dictionary = {}
 var _available_manifest_source := ""
 var _boot_status: Dictionary = {
@@ -20,9 +26,12 @@ var _boot_status: Dictionary = {
 func _init() -> void:
 	if "--update-test-mode" in OS.get_cmdline_user_args():
 		_state_path = "user://codex_update_test/update_state.json"
+		_update_log_path = "user://codex_update_test/update_log.json"
+		_update_report_path = "user://codex_update_test/update_report.json"
 		_update_dir = "user://codex_update_test/packages"
 	_prepare_directories()
 	_state = _read_json(_state_path)
+	_update_log = _read_json_array(_update_log_path)
 	_load_selected_package()
 
 
@@ -37,6 +46,10 @@ func _load_selected_package() -> void:
 		_state["failed"] = pending
 		_state.erase("pending")
 		_state["last_error"] = "A atualizacao %s nao confirmou a inicializacao e foi revertida." % str(pending.get("version", ""))
+		record_update_event("boot_load", "failed", str(_state["last_error"]), {
+			"failed_version": str(pending.get("version", "")),
+			"phase": "boot_confirmation",
+		})
 		# Quando a base e apenas o bootstrap, remover o pending sem reativar o
 		# pacote anterior deixa a aplicacao sem a cena principal e produz uma
 		# janela vazia. O ultimo pacote confirmado deve voltar a ser o ativo.
@@ -60,11 +73,18 @@ func _load_selected_package() -> void:
 			else:
 				_state.erase("active")
 			_state["last_error"] = "Pacote %s ignorado: executavel-base %s ja e igual ou mais novo." % [selected_version, base_version]
+			record_update_event("boot_load", "ignored", str(_state["last_error"]), {
+				"selected_version": selected_version,
+				"base_version": base_version,
+			})
 			_write_state()
 			selected = {}
 			pending = {}
 	if selected.is_empty():
 		_boot_status["version"] = base_version
+		record_update_event("boot_load", "info", "Executavel-base carregado.", {
+			"base_version": base_version,
+		})
 		return
 
 	var validation := _validate_local_package(selected)
@@ -89,6 +109,11 @@ func _load_selected_package() -> void:
 		pending["boot_started_at"] = Time.get_datetime_string_from_system(false, true)
 		_state["pending"] = pending
 		_write_state()
+	record_update_event("boot_load", "loaded", str(_boot_status.get("message", "")), {
+		"selected_version": str(selected.get("version", "")),
+		"package_path": package_path,
+		"pending": not pending.is_empty(),
+	})
 
 
 func _handle_invalid_selected_package(selected: Dictionary, message: String, was_pending: bool) -> void:
@@ -99,6 +124,11 @@ func _handle_invalid_selected_package(selected: Dictionary, message: String, was
 	else:
 		_state.erase("active")
 	_write_state()
+	record_update_event("boot_load", "failed", message, {
+		"failed_version": str(selected.get("version", "")),
+		"package_path": str(selected.get("path", "")),
+		"was_pending": was_pending,
+	})
 	_boot_status = {
 		"loaded": false,
 		"version": _base_version(),
@@ -112,6 +142,9 @@ func mark_boot_success() -> Dictionary:
 	if pending.is_empty():
 		_state["last_boot_ok_at"] = Time.get_datetime_string_from_system(false, true)
 		_write_state()
+		record_update_event("boot_confirm", "ok", "Inicializacao confirmada.", {
+			"version": current_version(),
+		})
 		return {"ok": true, "message": "Inicializacao confirmada.", "version": current_version()}
 
 	var active: Dictionary = _dictionary(_state.get("active", {}))
@@ -126,6 +159,10 @@ func mark_boot_success() -> Dictionary:
 	_state["last_boot_ok_at"] = Time.get_datetime_string_from_system(false, true)
 	_write_state()
 	_boot_status["pending"] = false
+	record_update_event("boot_confirm", "ok", "Atualizacao confirmada.", {
+		"version": str(pending.get("version", "")),
+		"activated_at": str(pending.get("activated_at", "")),
+	})
 	return {
 		"ok": true,
 		"message": "Atualizacao %s confirmada." % str(pending.get("version", "")),
@@ -170,10 +207,78 @@ func reset_test_state() -> bool:
 		return false
 	_remove_directory_contents(ProjectSettings.globalize_path("user://codex_update_test"))
 	_state = {}
+	_update_log = []
 	_available_manifest.clear()
 	_available_manifest_source = ""
 	_prepare_directories()
 	return true
+
+
+func update_log_snapshot(limit: int = 0) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for index in range(_update_log.size() - 1, -1, -1):
+		var entry: Variant = _update_log[index]
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		result.append((entry as Dictionary).duplicate(true))
+		if limit > 0 and result.size() >= limit:
+			break
+	return result
+
+
+func update_report_snapshot() -> Dictionary:
+	var by_operation: Dictionary = {}
+	var by_status: Dictionary = {}
+	var actionable_failures: Array[Dictionary] = []
+	for raw_event in _update_log:
+		if typeof(raw_event) != TYPE_DICTIONARY:
+			continue
+		var event: Dictionary = raw_event as Dictionary
+		var operation := str(event.get("operation", "unknown"))
+		var status := str(event.get("status", "info"))
+		by_operation[operation] = int(by_operation.get(operation, 0)) + 1
+		by_status[status] = int(by_status.get(status, 0)) + 1
+		if status == "failed":
+			actionable_failures.append(event.duplicate(true))
+	return {
+		"schema_version": UPDATE_LOG_SCHEMA_VERSION,
+		"generated_at": Time.get_datetime_string_from_system(false, true),
+		"base_version": _base_version(),
+		"current_version": current_version(),
+		"total_events": _update_log.size(),
+		"by_operation": by_operation,
+		"by_status": by_status,
+		"actionable_failures": actionable_failures,
+		"latest_event": update_log_snapshot(1)[0] if not _update_log.is_empty() else {},
+	}
+
+
+func record_update_event(operation: String, status: String = "info", message: String = "", metadata: Dictionary = {}) -> bool:
+	var clean_operation := operation.strip_edges()
+	if clean_operation == "":
+		return false
+	var clean_status := status.strip_edges()
+	if clean_status == "":
+		clean_status = "info"
+
+	var event := {
+		"schema_version": UPDATE_LOG_SCHEMA_VERSION,
+		"id": "upd-%s-%s-%s" % [Time.get_unix_time_from_system(), Time.get_ticks_msec(), _update_log.size()],
+		"timestamp": Time.get_datetime_string_from_system(false, true),
+		"operation": clean_operation,
+		"status": clean_status,
+		"message": message.strip_edges(),
+		"base_version": _base_version(),
+		"current_version": current_version(),
+	}
+	for key in metadata.keys():
+		event[str(key)] = metadata[key]
+
+	_update_log.append(event)
+	_prune_update_log()
+	var log_written := _write_json(_update_log_path, {"schema_version": UPDATE_LOG_SCHEMA_VERSION, "events": _update_log})
+	_write_json(_update_report_path, update_report_snapshot())
+	return log_written
 
 
 func available_manifest() -> Dictionary:
@@ -188,6 +293,9 @@ func check_for_updates(manifest_source: String = "") -> Dictionary:
 	if not bool(response.get("ok", false)):
 		_available_manifest.clear()
 		_available_manifest_source = ""
+		record_update_event("manifest_check", "failed", str(response.get("message", "Falha ao ler manifesto.")), {
+			"manifest_source": source,
+		})
 		return response
 
 	var manifest: Dictionary = response.get("manifest", {})
@@ -195,10 +303,17 @@ func check_for_updates(manifest_source: String = "") -> Dictionary:
 	if not bool(validation.get("ok", false)):
 		_available_manifest.clear()
 		_available_manifest_source = ""
+		record_update_event("manifest_check", "failed", str(validation.get("message", "Manifesto invalido.")), {
+			"manifest_source": source,
+		})
 		return validation
 
 	var minimum_base := str(manifest.get("minimum_base_version", "")).strip_edges()
 	if minimum_base != "" and compare_versions(_base_version(), minimum_base) < 0:
+		record_update_event("manifest_check", "blocked", "Manifesto exige executavel-base mais novo.", {
+			"manifest_source": source,
+			"minimum_base_version": minimum_base,
+		})
 		return {
 			"ok": false,
 			"requires_new_executable": true,
@@ -209,6 +324,13 @@ func check_for_updates(manifest_source: String = "") -> Dictionary:
 	var update_available := compare_versions(next_version, current_version()) > 0
 	_available_manifest = manifest.duplicate(true)
 	_available_manifest_source = source
+	var manifest_message := "Atualizacao disponivel." if update_available else "O sistema ja esta atualizado."
+	record_update_event("manifest_check", "ok", manifest_message, {
+		"manifest_source": source,
+		"available": update_available,
+		"manifest_version": next_version,
+		"minimum_base_version": minimum_base,
+	})
 	return {
 		"ok": true,
 		"available": update_available,
@@ -222,48 +344,90 @@ func check_for_updates(manifest_source: String = "") -> Dictionary:
 
 func install_available_update() -> Dictionary:
 	if _available_manifest.is_empty():
+		record_update_event("install", "failed", "Verifique as atualizacoes antes de instalar.")
 		return {"ok": false, "message": "Verifique as atualizacoes antes de instalar."}
 
 	var package_source := _resolve_package_source(_available_manifest, _available_manifest_source)
 	if package_source == "":
+		record_update_event("install", "failed", "O manifesto nao informou o pacote da atualizacao.", {
+			"manifest_version": str(_available_manifest.get("version", "")),
+		})
 		return {"ok": false, "message": "O manifesto nao informou o pacote da atualizacao."}
 
 	var version := str(_available_manifest.get("version", "")).strip_edges()
 	var temp_path := _update_dir.path_join("download-%s.tmp" % _safe_version(version))
 	var transfer := await _download_or_copy(package_source, temp_path)
 	if not bool(transfer.get("ok", false)):
+		record_update_event("install", "failed", str(transfer.get("message", "Falha no download/copia.")), {
+			"manifest_version": version,
+			"package_source": package_source,
+		})
 		return transfer
 
 	var validation := _validate_download(temp_path, _available_manifest)
 	if not bool(validation.get("ok", false)):
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(temp_path))
+		record_update_event("install", "failed", str(validation.get("message", "Pacote invalido.")), {
+			"manifest_version": version,
+			"package_source": package_source,
+		})
 		return validation
 
 	var staged := stage_update(temp_path, _available_manifest)
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(temp_path))
+	if bool(staged.get("ok", false)):
+		record_update_event("install", "staged", str(staged.get("message", "")), {
+			"manifest_version": version,
+			"package_source": package_source,
+			"restart_required": bool(staged.get("restart_required", false)),
+		})
+	else:
+		record_update_event("install", "failed", str(staged.get("message", "Falha ao preparar atualizacao.")), {
+			"manifest_version": version,
+			"package_source": package_source,
+		})
 	return staged
 
 
 func stage_update(package_path: String, manifest: Dictionary) -> Dictionary:
 	var validation := validate_manifest(manifest)
 	if not bool(validation.get("ok", false)):
+		record_update_event("install", "failed", str(validation.get("message", "Manifesto invalido.")), {
+			"candidate_version": str(manifest.get("version", "")),
+		})
 		return validation
 	var source_validation := _validate_download(package_path, manifest)
 	if not bool(source_validation.get("ok", false)):
+		record_update_event("install", "failed", str(source_validation.get("message", "Pacote invalido.")), {
+			"candidate_version": str(manifest.get("version", "")),
+			"package_path": package_path,
+		})
 		return source_validation
 
 	var version := str(manifest.get("version", "")).strip_edges()
 	if compare_versions(version, current_version()) <= 0:
+		record_update_event("install", "ignored", "A versao nao e mais nova que a instalada.", {
+			"candidate_version": version,
+			"current_version": current_version(),
+		})
 		return {"ok": false, "message": "A versao %s nao e mais nova que a instalada." % version}
 
 	var destination := _update_dir.path_join("grupo-rs-central-%s.pck" % _safe_version(version))
 	var copy_result := _copy_file(package_path, destination)
 	if not bool(copy_result.get("ok", false)):
+		record_update_event("install", "failed", str(copy_result.get("message", "Falha ao copiar pacote.")), {
+			"candidate_version": version,
+			"package_path": package_path,
+		})
 		return copy_result
 
 	var destination_validation := _validate_download(destination, manifest)
 	if not bool(destination_validation.get("ok", false)):
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(destination))
+		record_update_event("install", "failed", str(destination_validation.get("message", "Pacote copiado invalido.")), {
+			"candidate_version": version,
+			"package_path": destination,
+		})
 		return destination_validation
 
 	_state["pending"] = {
@@ -277,6 +441,12 @@ func stage_update(package_path: String, manifest: Dictionary) -> Dictionary:
 	}
 	_state.erase("last_error")
 	_write_state()
+	record_update_event("install", "staged", "Atualizacao instalada e aguardando reinicio.", {
+		"candidate_version": version,
+		"package_path": destination,
+		"sha256": str(manifest.get("sha256", "")).to_lower(),
+		"size": int(manifest.get("size", 0)),
+	})
 	return {
 		"ok": true,
 		"restart_required": true,
@@ -299,6 +469,7 @@ func prepare_rollback() -> Dictionary:
 	var active: Dictionary = _dictionary(_state.get("active", {}))
 	var previous: Dictionary = _dictionary(_state.get("previous", {}))
 	if active.is_empty() and previous.is_empty():
+		record_update_event("rollback", "failed", "Nao existe versao anterior para restaurar.", {})
 		return {"ok": false, "message": "Nao existe versao anterior para restaurar."}
 
 	if previous.is_empty():
@@ -306,6 +477,10 @@ func prepare_rollback() -> Dictionary:
 		_state.erase("active")
 		_state.erase("pending")
 		_write_state()
+		record_update_event("rollback", "prepared", "Retorno ao executavel base preparado.", {
+			"from_version": str(active.get("version", "")),
+			"to_version": _base_version(),
+		})
 		return {
 			"ok": true,
 			"restart_required": true,
@@ -317,6 +492,10 @@ func prepare_rollback() -> Dictionary:
 	_state["previous"] = active
 	_state.erase("pending")
 	_write_state()
+	record_update_event("rollback", "prepared", "Retorno para a versao %s preparado." % str(previous.get("version", "")), {
+		"from_version": str(active.get("version", "")),
+		"to_version": str(previous.get("version", "")),
+	})
 	return {
 		"ok": true,
 		"restart_required": true,
@@ -327,14 +506,20 @@ func prepare_rollback() -> Dictionary:
 
 func restart_application() -> Dictionary:
 	if OS.has_feature("editor"):
+		record_update_event("restart", "blocked", "Reinicio automatico disponivel somente no executavel exportado.", {})
 		return {"ok": false, "message": "Reinicio automatico disponivel somente no executavel exportado."}
 	var executable := OS.get_executable_path()
 	if executable.strip_edges() == "":
+		record_update_event("restart", "failed", "Executavel atual nao localizado.", {})
 		return {"ok": false, "message": "Executavel atual nao localizado."}
 	var process_id := OS.create_process(executable, PackedStringArray(["--updated-restart"]), false)
 	if process_id <= 0:
+		record_update_event("restart", "failed", "O Windows nao iniciou a nova instancia do sistema.", {})
 		return {"ok": false, "message": "O Windows nao iniciou a nova instancia do sistema."}
 	get_tree().quit()
+	record_update_event("restart", "ok", "Reiniciando o sistema.", {
+		"process_id": process_id,
+	})
 	return {"ok": true, "message": "Reiniciando o sistema."}
 
 
@@ -546,6 +731,22 @@ func _read_json(path: String) -> Dictionary:
 	return parsed as Dictionary if typeof(parsed) == TYPE_DICTIONARY else {}
 
 
+func _read_json_array(path: String) -> Array:
+	if not FileAccess.file_exists(path):
+		return []
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return []
+	var parsed: Variant = JSON.parse_string(file.get_as_text())
+	file.close()
+	if typeof(parsed) == TYPE_ARRAY:
+		return parsed as Array
+	if typeof(parsed) == TYPE_DICTIONARY:
+		var events: Variant = (parsed as Dictionary).get("events", [])
+		return events as Array if typeof(events) == TYPE_ARRAY else []
+	return []
+
+
 func _write_state() -> bool:
 	return _write_json(_state_path, _state)
 
@@ -563,6 +764,13 @@ func _write_json(path: String, value: Dictionary) -> bool:
 	if FileAccess.file_exists(global_path):
 		DirAccess.remove_absolute(global_path)
 	return DirAccess.rename_absolute(temp_path, global_path) == OK
+
+
+func _prune_update_log() -> void:
+	var max_entries := 500
+	if _update_log.size() <= max_entries:
+		return
+	_update_log = _update_log.slice(_update_log.size() - max_entries)
 
 
 func _dictionary(value: Variant) -> Dictionary:
