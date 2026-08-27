@@ -67,6 +67,7 @@ func _run() -> void:
 	for queue_path in [
 		"res://src/remote_operation_queue_current.gd",
 		"res://src/remote_operation_queue.gd",
+		"res://src/remote_operation_queue_v2.gd",
 	]:
 		await _check_successful_new_registration(queue_path)
 		await _check_api_failure(queue_path)

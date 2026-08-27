@@ -39,7 +39,7 @@ func has_active_or_visible() -> bool:
 func has_serial(serial: String) -> bool:
 	var target := _digits_only(serial)
 	for item in items:
-		if str(item.get("state", "")) in ["queued", "running", "fallback"] and _digits_only(str(item.get("serial", ""))) == target:
+		if str(item.get("state", "")) in ["queued", "running", "fallback", "pending"] and _digits_only(str(item.get("serial", ""))) == target:
 			return target != ""
 	return false
 
@@ -159,10 +159,42 @@ func _run(job: Dictionary) -> void:
 		_update(id, "Cadastro do equipamento", "API principal consultando chip, telefone e APN")
 		result = await host.call("_perform_equipment_registration", request)
 		if bool(result.get("ok", false)):
-			_update(id, "Confirmando placa e vinculo", str(request.get("plate", "")))
-			var local_result: Dictionary = await host.call("_finalize_local_equipment_registration", local_product, request)
-			if not bool(local_result.get("ok", false)):
-				result = {"ok": false, "message": str(local_result.get("message", "Falha ao atualizar o cadastro local."))}
+			var registration_confirmation_pending := bool(result.get("confirmation_pending", false))
+			if registration_confirmation_pending and typeof(result.get("request", {})) == TYPE_DICTIONARY:
+				request.merge(result.get("request", {}) as Dictionary, true)
+			_update(
+				id,
+				"Confirmacao pendente" if registration_confirmation_pending else "Confirmando placa e vinculo",
+				str(result.get("message", request.get("plate", ""))) if registration_confirmation_pending else str(request.get("plate", "")),
+				"pending" if registration_confirmation_pending else "running",
+				"API principal"
+			)
+			# Artefato v2 mantido como histórico recuperável/inativo. Se for
+			# carregado por engano, ele não pode concluir Cadastro sem a mesma
+			# barreira do controller oficial: API confirmada -> Store local ->
+			# Firebase confirmado.
+			if registration_confirmation_pending:
+				result = {
+					"ok": false,
+					"confirmation_pending": true,
+					"message": str(result.get("message", "A API aceitou o cadastro, mas a confirmacao ainda esta pendente.")),
+					"response_code": int(result.get("response_code", result.get("http_code", 0))),
+				}
+			else:
+				var local_result: Dictionary = await host.call("_finalize_local_equipment_registration", local_product, request)
+				if not bool(local_result.get("ok", false)):
+					result = {"ok": false, "message": str(local_result.get("message", "Falha ao atualizar o cadastro local."))}
+				else:
+					result["local"] = local_result
+					var firebase_result: Dictionary = await host.call("_ensure_firebase_modification_saved", serial, local_result.get("product", {}) as Dictionary)
+					if not bool(firebase_result.get("ok", false)):
+						result = {
+							"ok": false,
+							"message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao do cadastro.")),
+							"firebase_pending": true,
+						}
+					else:
+						result["firebase"] = firebase_result
 	else:
 		_update(id, "Consultando o aparelho", "API principal")
 		result = await host.call("_perform_equipment_modification", request, null)
@@ -177,14 +209,26 @@ func _run(job: Dictionary) -> void:
 					# A persistencia ja foi confirmada. Atualize a tela/lista que o
 					# operador esta vendo para nao deixar o formulario com os dados
 					# antigos depois que a fila terminar.
+					var firebase_result: Dictionary = await host.call("_ensure_firebase_modification_saved", serial, local_modification.get("product", {}) as Dictionary)
+					if not bool(firebase_result.get("ok", false)):
+						result = {"ok": false, "message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao da modificacao.")), "firebase_pending": true}
+					else:
+						result["firebase"] = firebase_result
 					if bool(result.get("ok", false)) and host.has_method("_on_remote_operation_localized"):
 						host.call_deferred("_on_remote_operation_localized", kind, serial)
 	if bool(result.get("ok", false)):
-		_finish(id, true, "Confirmado | %s" % ("cadastro e vinculo" if kind == "Cadastro" else "dados sincronizados"), "Fallback web" if bool(result.get("web", false)) else "API principal")
+		var confirmation_pending := bool(result.get("confirmation_pending", false))
+		_finish(
+			id,
+			true,
+			"API aceitou; confirmacao completa pendente. Nenhum fallback foi repetido." if confirmation_pending else "Confirmado | %s" % ("cadastro e vinculo" if kind == "Cadastro" else "dados sincronizados"),
+			"API principal",
+			"pending" if confirmation_pending else ""
+		)
 		host.call("_log_system_action", "Operacao remota concluida", "%s | Serie: %s" % [kind, serial], serial)
 	else:
 		var message := str(result.get("message", "A operacao remota nao foi confirmada."))
-		_finish(id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API principal")
+		_finish(id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API principal", "pending" if bool(result.get("firebase_pending", false)) or bool(result.get("confirmation_pending", false)) else "")
 		host.call("_log_system_action", "Falhou operacao remota", "%s | Serie: %s" % [message, serial], serial)
 	_drain()
 
@@ -199,12 +243,12 @@ func _update(id: String, stage: String, detail: String = "", state: String = "ru
 			_rebuild()
 			return
 
-func _finish(id: String, success: bool, detail: String, source: String) -> void:
+func _finish(id: String, success: bool, detail: String, source: String, state_override: String = "") -> void:
 	for item in items:
 		if str(item.get("id", "")) == id:
 			item["stage"] = "Concluido" if success else "Falhou"
 			item["detail"] = detail
-			item["state"] = "success" if success else "error"
+			item["state"] = state_override if state_override != "" else ("success" if success else "error")
 			item["source"] = source
 			active.erase(id)
 			_rebuild()
@@ -264,7 +308,7 @@ func _rebuild() -> void:
 
 func _row(item: Dictionary) -> Control:
 	var state := str(item.get("state", "queued"))
-	var color := GREEN if state == "success" else RED if state == "error" else ORANGE if state == "fallback" else BLUE
+	var color := GREEN if state == "success" else RED if state == "error" else ORANGE if state in ["fallback", "pending"] else BLUE
 	var row := PanelContainer.new()
 	row.custom_minimum_size = Vector2(0, 42)
 	row.add_theme_stylebox_override("panel", _style_box(Color("#f9fcff"), Color("#e0ebf4"), 1, 9))
@@ -278,7 +322,7 @@ func _row(item: Dictionary) -> Control:
 	line.add_theme_constant_override("separation", 9)
 	margin.add_child(line)
 	var dot := Label.new()
-	dot.text = "✓" if state == "success" else "!" if state == "error" else "◌" if state in ["running", "fallback"] else "○"
+	dot.text = "✓" if state == "success" else "!" if state == "error" else "…" if state == "pending" else "◌" if state in ["running", "fallback"] else "○"
 	dot.custom_minimum_size = Vector2(23, 0)
 	dot.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	dot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -319,7 +363,7 @@ func _row(item: Dictionary) -> Control:
 	source.add_theme_color_override("font_color", color)
 	top.add_child(source)
 	row.tooltip_text = str(item.get("detail", ""))
-	if state in ["queued", "running", "fallback"]:
+	if state in ["queued", "running", "fallback", "pending"]:
 		var pulse := dot.create_tween().set_loops()
 		pulse.tween_property(dot, "modulate:a", 0.45, 0.55)
 		pulse.tween_property(dot, "modulate:a", 1.0, 0.55)

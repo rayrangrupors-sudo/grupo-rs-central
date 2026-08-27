@@ -44,7 +44,7 @@ func has_serial(serial: String) -> bool:
 	if target == "":
 		return false
 	for item in items:
-		if str(item.get("state", "")) in ["queued", "running", "fallback"] and _digits_only(str(item.get("serial", ""))) == target:
+		if str(item.get("state", "")) in ["queued", "running", "fallback", "pending"] and _digits_only(str(item.get("serial", ""))) == target:
 			return true
 	return false
 
@@ -310,7 +310,7 @@ func _rebuild() -> void:
 
 func _row(item: Dictionary) -> Control:
 	var state := str(item.get("state", "queued"))
-	var color := GREEN if state == "success" else RED if state == "error" else ORANGE if state == "fallback" else BLUE
+	var color := GREEN if state == "success" else RED if state == "error" else ORANGE if state in ["fallback", "pending"] else BLUE
 	var row := PanelContainer.new()
 	row.custom_minimum_size = Vector2(0, 42)
 	row.add_theme_stylebox_override("panel", _style_box(Color("#f9fcff"), Color("#e0ebf4"), 1, 9))
@@ -324,7 +324,7 @@ func _row(item: Dictionary) -> Control:
 	line.add_theme_constant_override("separation", 9)
 	margin.add_child(line)
 	var dot := Label.new()
-	dot.text = "✓" if state == "success" else "!" if state == "error" else "◌" if state in ["running", "fallback"] else "○"
+	dot.text = "✓" if state == "success" else "!" if state == "error" else "…" if state == "pending" else "◌" if state in ["running", "fallback"] else "○"
 	dot.custom_minimum_size = Vector2(23, 0)
 	dot.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	dot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -365,7 +365,7 @@ func _row(item: Dictionary) -> Control:
 	source.add_theme_color_override("font_color", color)
 	top.add_child(source)
 	row.tooltip_text = str(item.get("detail", ""))
-	if state in ["queued", "running", "fallback"]:
+	if state in ["queued", "running", "fallback", "pending"]:
 		var pulse := dot.create_tween().set_loops()
 		pulse.tween_property(dot, "modulate:a", 0.45, 0.55)
 		pulse.tween_property(dot, "modulate:a", 1.0, 0.55)
