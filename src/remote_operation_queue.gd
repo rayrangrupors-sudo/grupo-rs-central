@@ -161,15 +161,48 @@ func _run(job: Dictionary) -> void:
 	var local_product: Dictionary = job.get("local_product", {}) as Dictionary
 	var id := str(job.get("queue_id", ""))
 	var serial := _digits_only(str(request.get("serial", request.get("remote_serial", ""))))
+	var started_at := Time.get_ticks_msec()
 	var result: Dictionary
 	if kind == "Cadastro":
 		_update(id, "Cadastro do equipamento", "API principal consultando chip, telefone e APN")
 		result = await host.call("_perform_equipment_registration", request)
 		if bool(result.get("ok", false)):
-			_update(id, "Confirmando placa e vinculo", str(request.get("plate", "")))
-			var local_result: Dictionary = await host.call("_finalize_local_equipment_registration", local_product, request)
-			if not bool(local_result.get("ok", false)):
-				result = {"ok": false, "message": str(local_result.get("message", "Falha ao atualizar o cadastro local."))}
+			var registration_confirmation_pending := bool(result.get("confirmation_pending", false))
+			if registration_confirmation_pending and typeof(result.get("request", {})) == TYPE_DICTIONARY:
+				request.merge(result.get("request", {}) as Dictionary, true)
+			_update(
+				id,
+				"Confirmacao pendente" if registration_confirmation_pending else "Confirmando placa e vinculo",
+				str(result.get("message", request.get("plate", ""))) if registration_confirmation_pending else str(request.get("plate", "")),
+				"pending" if registration_confirmation_pending else "running",
+				"API principal"
+			)
+			# Arquivo legado mantido como compatibilidade defensiva. Se ele for
+			# carregado por engano, Cadastro segue a mesma regra do controller
+			# atual: API confirmada -> Store local -> Firebase confirmado. Sem a
+			# leitura Firebase, a fila fica pendente e nunca exibe sucesso falso.
+			if registration_confirmation_pending:
+				result = {
+					"ok": false,
+					"confirmation_pending": true,
+					"message": str(result.get("message", "A API aceitou o cadastro, mas a confirmacao ainda esta pendente.")),
+					"response_code": int(result.get("response_code", result.get("http_code", 0))),
+				}
+			else:
+				var local_result: Dictionary = await host.call("_finalize_local_equipment_registration", local_product, request)
+				if not bool(local_result.get("ok", false)):
+					result = {"ok": false, "message": str(local_result.get("message", "Falha ao atualizar o cadastro local."))}
+				else:
+					result["local"] = local_result
+					var firebase_result: Dictionary = await host.call("_ensure_firebase_modification_saved", serial, local_result.get("product", {}) as Dictionary)
+					if not bool(firebase_result.get("ok", false)):
+						result = {
+							"ok": false,
+							"message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao do cadastro.")),
+							"firebase_pending": true,
+						}
+					else:
+						result["firebase"] = firebase_result
 	else:
 		_update(id, "Consultando o aparelho", "API principal")
 		result = await host.call("_perform_equipment_modification", request, null)
@@ -181,12 +214,18 @@ func _run(job: Dictionary) -> void:
 				var local_modification: Dictionary = await host.call("_finalize_local_equipment_modification", request)
 				if not bool(local_modification.get("ok", false)):
 					result = {"ok": false, "message": str(local_modification.get("message", "Falha ao atualizar o cadastro local."))}
+				else:
+					var firebase_result: Dictionary = await host.call("_ensure_firebase_modification_saved", serial, local_modification.get("product", {}) as Dictionary)
+					if not bool(firebase_result.get("ok", false)):
+						result = {"ok": false, "message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao da modificacao.")), "firebase_pending": true}
+					else:
+						result["firebase"] = firebase_result
 	if bool(result.get("ok", false)):
 		_finish(id, true, "Confirmado | %s" % ("cadastro e vinculo" if kind == "Cadastro" else "dados sincronizados"), "Fallback web" if bool(result.get("web", false)) else "API principal")
 		host.call("_log_system_action", "Operacao remota concluida", "%s | Serie: %s" % [kind, serial], serial)
 	else:
 		var message := str(result.get("message", "A operacao remota nao foi confirmada."))
-		_finish(id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API principal")
+		_finish(id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API principal", "pending" if bool(result.get("firebase_pending", false)) or bool(result.get("confirmation_pending", false)) else "")
 		host.call("_log_system_action", "Falhou operacao remota", "%s | Serie: %s" % [message, serial], serial)
 	_drain()
 
@@ -203,12 +242,12 @@ func _update(id: String, stage: String, detail: String = "", state: String = "ru
 			return
 
 
-func _finish(id: String, success: bool, detail: String, source: String) -> void:
+func _finish(id: String, success: bool, detail: String, source: String, state_override: String = "") -> void:
 	for item in items:
 		if str(item.get("id", "")) == id:
 			item["stage"] = "Concluido" if success else "Falhou"
 			item["detail"] = detail
-			item["state"] = "success" if success else "error"
+			item["state"] = state_override if state_override != "" else ("success" if success else "error")
 			item["source"] = source
 			active.erase(id)
 			_rebuild()

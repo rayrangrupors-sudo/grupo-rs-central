@@ -174,6 +174,20 @@ func _run(job: Dictionary) -> void:
 				var local_result: Dictionary = await host.call("_finalize_local_equipment_registration", local_product, request)
 				if not bool(local_result.get("ok", false)):
 					result = {"ok": false, "message": str(local_result.get("message", "Falha ao atualizar o cadastro local."))}
+				else:
+					# O upsert local emite a solicitacao de sincronizacao, mas o cadastro
+					# remoto so pode ser concluido depois que o Firebase confirmar o
+					# flush e a leitura do produto. Sem esta barreira, o fluxo de
+					# Cadastro podia encerrar antes de o novo registro chegar ao Firebase.
+					var firebase_result: Dictionary = await host.call("_ensure_firebase_modification_saved", serial, local_result.get("product", {}) as Dictionary)
+					if not bool(firebase_result.get("ok", false)):
+						result = {
+							"ok": false,
+							"message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao do cadastro.")),
+							"firebase_pending": true,
+						}
+					else:
+						result["firebase"] = firebase_result
 	else:
 		_update(id, "Consultando o aparelho", "API principal")
 		result = await host.call("_perform_equipment_modification", request, null)
@@ -210,7 +224,13 @@ func _run(job: Dictionary) -> void:
 			_log_remote_operation_event(kind, serial, result, id, started_at, false)
 	else:
 		var message := str(result.get("message", "A operacao remota nao foi confirmada."))
-		_finish(id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API principal")
+		_finish(
+			id,
+			false,
+			message,
+			"Fallback web" if bool(result.get("fallback_web", false)) else "API principal",
+			"pending" if bool(result.get("firebase_pending", false)) else ""
+		)
 		_log_remote_operation_event(kind, serial, result, id, started_at, false)
 	_drain()
 

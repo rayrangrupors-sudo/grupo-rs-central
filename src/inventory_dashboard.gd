@@ -1276,6 +1276,8 @@ var online_lookup_body: VBoxContainer
 var online_lookup_status_label: Label
 var online_lookup_last_query := ""
 var online_lookup_current_rows: Array[Dictionary] = []
+var online_lookup_reconcile_running: Dictionary = {}
+var online_lookup_reconcile_done: Dictionary = {}
 var table_body: VBoxContainer
 var table_pager: HBoxContainer
 var table_page_info_label: Label
@@ -16801,6 +16803,108 @@ func _render_online_lookup_rows(rows: Array[Dictionary]) -> void:
 	for online_product in rows:
 		online_lookup_body.add_child(_make_online_lookup_row(online_product))
 	_schedule_sga_status_for_products(rows)
+	_schedule_online_lookup_confirmed_api_reconcile(rows)
+
+
+func _schedule_online_lookup_confirmed_api_reconcile(rows: Array[Dictionary]) -> void:
+	if rows.size() != 1 or store == null:
+		return
+	var query := str(online_lookup_last_query).strip_edges()
+	if query == "":
+		return
+	var product := _online_lookup_action_product(rows[0])
+	var serial := _digits_only(str(product.get("imei", product.get("serial", ""))))
+	var plate := _format_grupo_rs_vehicle_plate(str(product.get("plate", "")))
+	if serial == "" or plate == "":
+		return
+	var query_key := _search_key(query)
+	var exact_query := query_key == _search_key(serial) or _normalize_location_plate(query) == _normalize_location_plate(plate)
+	if not exact_query:
+		return
+	if not store.get_product(serial).is_empty():
+		return
+	if bool(online_lookup_reconcile_running.get(serial, false)) or bool(online_lookup_reconcile_done.get(serial, false)):
+		return
+	online_lookup_reconcile_running[serial] = true
+	call_deferred("_reconcile_confirmed_api_vehicle_to_firebase", serial, plate, product.duplicate(true))
+
+
+func _reconcile_confirmed_api_vehicle_to_firebase(serial: String, plate: String, online_product: Dictionary = {}) -> void:
+	var result := await _sync_confirmed_api_vehicle_to_firebase(serial, plate, online_product)
+	online_lookup_reconcile_running.erase(serial)
+	if bool(result.get("ok", false)):
+		online_lookup_reconcile_done[serial] = true
+		_log_system_action("Sincronizou vinculo confirmado Grupo RS", "API confirmou placa; Store e Firebase confirmados. Serie: %s" % serial, serial)
+		_refresh_table()
+		_refresh_online_lookup_from_cache()
+	else:
+		_log_system_action_event(
+			"Sincronizacao pendente Grupo RS",
+			"%s | Serie: %s" % [str(result.get("message", "Firebase nao confirmou a sincronizacao do vinculo.")), serial],
+			serial,
+			{
+				"status": "progress" if bool(result.get("firebase_pending", false)) else "failed",
+				"phase": "sincronizacao",
+				"operation": "api_confirmada_para_firebase",
+				"transport": "firebase",
+				"confirmation_pending": bool(result.get("firebase_pending", false)),
+			}
+		)
+
+
+func _sync_confirmed_api_vehicle_to_firebase(serial: String, plate: String = "", online_product: Dictionary = {}) -> Dictionary:
+	if store == null:
+		return {"ok": false, "message": "Store local indisponivel para recompor o espelho do Grupo RS."}
+	var clean_serial := _digits_only(serial)
+	var clean_plate := _format_grupo_rs_vehicle_plate(plate)
+	if clean_serial == "":
+		return {"ok": false, "message": "Serie ausente para sincronizar o vinculo confirmado."}
+	var vehicle_result := await _grupo_rs_api_find_vehicle(clean_plate, clean_serial, true, false)
+	if not bool(vehicle_result.get("ok", false)):
+		return {
+			"ok": false,
+			"message": str(vehicle_result.get("message", "A API Grupo RS nao confirmou o vinculo para sincronizacao.")),
+			"response_code": int(vehicle_result.get("response_code", 0)),
+		}
+	var row := vehicle_result.get("row", {}) as Dictionary
+	var official_plate := _format_grupo_rs_vehicle_plate(str(row.get("plate", clean_plate)))
+	var official_serial := _digits_only(str(row.get("serial", clean_serial)))
+	if official_serial == "":
+		official_serial = clean_serial
+	if official_serial != clean_serial or official_plate == "":
+		return {"ok": false, "message": "A API retornou identidade divergente; espelho local bloqueado."}
+	var request := {
+		"serial": clean_serial,
+		"remote_serial": clean_serial,
+		"local_sku": clean_serial,
+		"new_plate": official_plate,
+		"vehicle_target_plate": official_plate,
+		"chip_number": str(online_product.get("chip", row.get("chip", ""))),
+		"phone": str(online_product.get("phone", row.get("phone", ""))),
+		"operator": str(online_product.get("operator", "")),
+		"apn": str(online_product.get("apn", "")),
+		"model": str(online_product.get("model", "Reutilizado")),
+		"tracker_status": "Estoque",
+	}
+	if str(request.get("operator", "")).strip_edges() == "" and str(online_product.get("client", "")).strip_edges() != "":
+		request["client"] = str(online_product.get("client", ""))
+	var local_result := _finalize_local_equipment_modification(request)
+	if not bool(local_result.get("ok", false)):
+		return {"ok": false, "message": str(local_result.get("message", "Falha ao recompor o espelho local."))}
+	var expected_product := local_result.get("product", {}) as Dictionary
+	expected_product["remote_registration_status"] = "vinculo_confirmado_api"
+	var saved := store.upsert_product_replacing_sku(clean_serial, expected_product)
+	if saved.is_empty():
+		return {"ok": false, "message": "Falha ao marcar o espelho confirmado pela API."}
+	var firebase_result := await _ensure_firebase_modification_saved(clean_serial, saved)
+	if not bool(firebase_result.get("ok", false)):
+		return {
+			"ok": false,
+			"firebase_pending": true,
+			"product": saved,
+			"message": str(firebase_result.get("message", "O Firebase nao confirmou a leitura do espelho sincronizado.")),
+		}
+	return {"ok": true, "product": saved, "firebase": firebase_result, "api": vehicle_result}
 
 func _make_online_lookup_row(product: Dictionary) -> Control:
 	var panel := PanelContainer.new()
@@ -39545,12 +39649,72 @@ func _perform_api_vehicle_modification(request: Dictionary) -> Dictionary:
 	if not bool(current_result.get("ok", false)):
 		current_result = await _grupo_rs_api_find_vehicle("", serial, true, false)
 	if not bool(current_result.get("ok", false)):
-		# Modificar nunca cadastra uma associacao nova. Sem um veiculo existente,
-		# interrompa o fluxo e oriente o operador a usar "Novo equipamento".
-		# Isso evita que uma falha de consulta transforme uma alteracao em cadastro
-		# duplicado ou deixe o equipamento associado a uma placa inesperada.
 		var lookup_code := int(current_result.get("response_code", 0))
 		var not_found := bool(current_result.get("not_found", false)) or lookup_code in [0, 404]
+		# Aparelhos cadastrados como "somente equipamento" ainda nao possuem
+		# ficha de veiculo. Quando o operador informa uma placa depois da busca
+		# do IMEI, a acao Modificar deve criar o primeiro vinculo confirmado em
+		# vez de deixar a placa apenas no formulario/resumo.
+		if old_plate == "" and not_found:
+			var equipment_result := await _grupo_rs_api_find_equipment(serial, true)
+			if not bool(equipment_result.get("ok", false)):
+				return {
+					"handled": true,
+					"ok": false,
+					"message": str(equipment_result.get("message", "A API nao confirmou o equipamento para criar o primeiro vinculo.")),
+					"response_code": int(equipment_result.get("response_code", 0)),
+				}
+			var create_request := request.duplicate(true)
+			create_request["plate"] = new_plate
+			create_request["new_plate"] = new_plate
+			create_request["vehicle_target_plate"] = new_plate
+			create_request["force_rs300_titular"] = bool(request.get("force_rs300_titular", true))
+			create_request["clear_vehicle_fields"] = bool(request.get("clear_vehicle_fields", true))
+			create_request["vehicle_type"] = str(request.get("vehicle_type", "Carro")).strip_edges()
+			if create_request["vehicle_type"] == "":
+				create_request["vehicle_type"] = "Carro"
+			create_request["api_vehicle_type_id"] = int(request.get("api_vehicle_type_id", 1))
+			create_request["api_display_plate"] = true
+			create_request["api_vehicle_status"] = "A"
+			var created := await _grupo_rs_api_register_vehicle(create_request, equipment_result.get("row", {}) as Dictionary)
+			if bool(created.get("confirmation_pending", false)):
+				return {
+					"handled": true,
+					"ok": false,
+					"confirmation_pending": true,
+					"message": str(created.get("message", "A API aceitou a placa, mas a leitura do vinculo ainda esta pendente.")),
+					"response_code": int(created.get("response_code", 0)),
+				}
+			if not bool(created.get("ok", false)):
+				if bool(created.get("fallback_web", false)):
+					return {
+						"handled": true,
+						"ok": false,
+						"api_unavailable": true,
+						"message": "A API oficial de veiculos nao confirmou o primeiro vinculo. Nenhum fallback web foi usado e nenhum sucesso foi marcado.",
+						"response_code": int(created.get("response_code", 0)),
+					}
+				return {
+					"handled": true,
+					"ok": false,
+					"message": str(created.get("message", "A API nao confirmou a criacao do primeiro vinculo.")),
+					"response_code": int(created.get("response_code", 0)),
+				}
+			var created_row := created.get("row", {}) as Dictionary
+			if not _grupo_rs_api_reassignment_row_is_complete(created_row, new_plate, bool(create_request.get("clear_vehicle_fields", false))):
+				var created_verify := await _grupo_rs_api_find_vehicle(new_plate, serial, true, false)
+				if bool(created_verify.get("ok", false)):
+					created_row = created_verify.get("row", {}) as Dictionary
+			if not _grupo_rs_api_reassignment_row_is_complete(created_row, new_plate, bool(create_request.get("clear_vehicle_fields", false))):
+				return {
+					"handled": true,
+					"ok": false,
+					"confirmation_pending": true,
+					"message": "A API aceitou a criacao do vinculo, mas a leitura ainda nao confirmou a placa.",
+				}
+			return {"handled": true, "ok": true, "api": true, "row": created_row, "created_vehicle": true, "policy_verified": "api"}
+		# Para troca de placa de um veiculo existente, a ausencia da associacao
+		# atual continua bloqueante: nao escolha outra linha nem crie duplicidade.
 		if old_plate != "" and not not_found:
 			return {"handled": false, "fallback_web": true, "message": str(current_result.get("message", "A API nao confirmou a associacao atual.")), "response_code": lookup_code}
 		return {
@@ -47947,6 +48111,11 @@ func legacy_remote_queue_stage(request: Dictionary, stage: String, detail: Strin
 
 
 func legacy_enqueue_remote_operation(kind: String, local_product: Dictionary, request: Dictionary) -> String:
+	# Compatibilidade defensiva: o runtime normal instancia
+	# RemoteOperationQueueScript (remote_operation_queue_current.gd) em _build_ui.
+	# Se este fallback interno for alcançado por uma falha de inicialização, ele
+	# deve obedecer às mesmas barreiras do controller atual: API confirmada,
+	# Store local atualizada e Firebase verificado antes de exibir sucesso.
 	var serial := _digits_only(str(request.get("serial", request.get("remote_serial", local_product.get("imei", "")))))
 	if serial == "" or _remote_queue_has_serial(serial):
 		return ""
@@ -47981,10 +48150,35 @@ func legacy_run_remote_operation_job(job: Dictionary) -> void:
 		_remote_queue_stage(request, "Cadastro do equipamento", "API oficial consultando")
 		result = await _perform_equipment_registration(request)
 		if bool(result.get("ok", false)):
-			_remote_queue_stage(request, "Confirmando cadastro e vinculo", str(request.get("plate", "")))
-			var finalized := _finalize_local_equipment_registration(local_product, request)
-			if not bool(finalized.get("ok", false)):
-				result = {"ok": false, "message": str(finalized.get("message", "Falha ao atualizar o cadastro local."))}
+			if bool(result.get("confirmation_pending", false)) and typeof(result.get("request", {})) == TYPE_DICTIONARY:
+				request.merge(result.get("request", {}) as Dictionary, true)
+			if bool(result.get("confirmation_pending", false)):
+				result = {
+					"ok": false,
+					"confirmation_pending": true,
+					"message": str(result.get("message", "A API aceitou o cadastro, mas a confirmacao ainda esta pendente.")),
+					"response_code": int(result.get("response_code", result.get("http_code", 0))),
+				}
+			else:
+				_remote_queue_stage(request, "Confirmando cadastro e vinculo", str(request.get("plate", "")))
+				var finalized := _finalize_local_equipment_registration(local_product, request)
+				if not bool(finalized.get("ok", false)):
+					result = {"ok": false, "message": str(finalized.get("message", "Falha ao atualizar o cadastro local."))}
+				else:
+					result["local"] = finalized
+					var firebase_result := await _ensure_firebase_modification_saved(serial, finalized.get("product", {}) as Dictionary)
+					if not bool(firebase_result.get("ok", false)):
+						result = {
+							"ok": false,
+							"message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao do cadastro.")),
+							"firebase_pending": true,
+						}
+					else:
+						result["firebase"] = firebase_result
+		# A ramificação antiga não pode cair adiante e gravar um cadastro sem a
+		# barreira Firebase. A partir daqui o resultado já representa o estado
+		# final seguro do cadastro.
+		pass
 	else:
 		_remote_queue_stage(request, "Consultando o aparelho", "API oficial")
 		result = await _perform_equipment_modification(request)
@@ -47996,11 +48190,28 @@ func legacy_run_remote_operation_job(job: Dictionary) -> void:
 				var firebase_result := await _ensure_firebase_modification_saved(serial, finalized_modification.get("product", {}) as Dictionary)
 				if not bool(firebase_result.get("ok", false)):
 					result = {"ok": false, "message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao da modificacao.")), "firebase_pending": true}
-	if bool(result.get("ok", false)):
+	if bool(result.get("confirmation_pending", false)) and not bool(result.get("ok", false)):
+		var pending_message := str(result.get("message", "A API aceitou a operacao, mas a confirmacao ainda esta pendente."))
+		_remote_queue_finish(queue_id, false, pending_message, "API", "pending")
+		_log_system_action_event(
+			"Operacao remota pendente",
+			"A operacao foi aceita ou pode ter sido aplicada, mas a leitura de confirmacao ainda esta pendente. Serie: %s | %s" % [serial, pending_message],
+			serial,
+			{
+				"status": "pending",
+				"phase": "modificacao" if kind != "Cadastro" else "cadastro",
+				"operation": "modificacao_equipamento" if kind != "Cadastro" else "cadastro_e_vinculo",
+				"transport": "api",
+				"http_code": int(result.get("response_code", result.get("http_code", 0))),
+				"retryable": true,
+				"correlation_id": "remote-%s" % queue_id,
+			}
+		)
+	elif bool(result.get("ok", false)):
 		_remote_queue_finish(queue_id, true, "Confirmado | %s" % ("cadastro e vinculo" if kind == "Cadastro" else "dados sincronizados"), "Fallback web" if bool(result.get("web", false)) else "API")
 		_log_system_action("Operacao remota concluida", "%s | Serie: %s" % [kind, serial], serial)
 	else:
 		var message := str(result.get("message", "A operacao remota nao foi confirmada."))
-		_remote_queue_finish(queue_id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API")
+		_remote_queue_finish(queue_id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API", "pending" if bool(result.get("firebase_pending", false)) else "")
 		_log_system_action("Falhou operacao remota", "%s | Serie: %s" % [message, serial], serial)
 	_drain_remote_operation_queue()
