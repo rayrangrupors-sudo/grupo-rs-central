@@ -73,7 +73,7 @@ function Assert-RequiredFiles {
         "project.godot",
         "export_presets.cfg",
         "src\update_bootstrap.gd",
-        "src\firebase_sync.gd",
+        "src\local_database_sync.gd",
         "src\inventory_store.gd",
         "src\inventory_dashboard.gd",
         "src\anatel_coverage.gd",

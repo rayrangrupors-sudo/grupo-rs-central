@@ -50,3 +50,7 @@ ai_config.json
 gemini_api_key*
 .test-user*/
 artifacts/
+/outputs/
+/projeto/
+**/__pycache__/
+*.pyc

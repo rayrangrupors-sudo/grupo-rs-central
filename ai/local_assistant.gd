@@ -26,7 +26,7 @@ func setup(context_provider: AIContextProvider) -> void:
 		{"id": "consultar_inconsistencias", "phrases": ["inconsistencia", "campos vazios", "dados incompletos", "formato invalido"]},
 		{"id": "consultar_manutencao", "phrases": ["em manutencao", "manutencoes", "equipamentos com problema", "quantos em manutencao"]},
 		{"id": "consultar_estoque", "phrases": ["resumo do estoque", "quantos aparelhos", "aparelhos disponiveis", "estoque baixo", "disponiveis"]},
-		{"id": "consultar_sincronizacao", "phrases": ["sistema sincronizado", "status da sincronizacao", "firebase", "servidor conectado"]},
+		{"id": "consultar_sincronizacao", "phrases": ["sistema sincronizado", "status da sincronizacao", "local_database", "servidor conectado"]},
 		{"id": "ajuda_baixa", "phrases": ["como dar baixa", "dar baixa em um aparelho", "baixa no estoque"]},
 		{"id": "ajuda_cadastro", "phrases": ["como cadastrar", "novo rastreador", "adicionar equipamento", "cadastrar aparelho"]},
 		{"id": "ajuda_monitor_4g", "phrases": ["explique o monitor 4g", "como funciona o monitor 4g", "tela monitor 4g"]},

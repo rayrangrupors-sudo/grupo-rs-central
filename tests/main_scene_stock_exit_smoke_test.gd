@@ -16,12 +16,14 @@ func _run() -> void:
 	root.add_child(instance)
 	await process_frame
 	await process_frame
+	var sidebar_buttons: Dictionary = instance.get("sidebar_buttons")
+	_check(sidebar_buttons.has("monitor_4g"), "Barra lateral de Imperatriz não exibiu o botão Mapa Grande.")
 	instance.call("_show_list")
 	await process_frame
 	_check(str(instance.get("current_section")) == "inventory", "Botão/rota Estoque não selecionou a seção inventory.")
 	var topbar_title: Variant = instance.get("topbar_title_label")
 	_check(topbar_title is Label and (topbar_title as Label).text == "Estoque de equipamentos", "Título do Estoque não foi renderizado.")
-	_check(int(instance.get("offline_external_calls")) == 0, "Estoque tentou alcançar Firebase/HTTP/SGA/ciclo remoto.")
+	_check(int(instance.get("offline_external_calls")) == 0, "Estoque tentou alcançar Banco local SQL/HTTP/SGA/ciclo remoto.")
 	instance.call("_request_exit")
 	await process_frame
 	var exit_dialog: CanvasLayer

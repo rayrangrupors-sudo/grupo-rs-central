@@ -28,7 +28,7 @@ static func decode(value: Variant) -> Dictionary:
 
 
 static func decode_local_product(product: Dictionary) -> Dictionary:
-	## Decodifica somente o pacote bruto armazenado localmente/Firebase.
+	## Decodifica somente o pacote bruto armazenado localmente/Banco local SQL.
 	## A associacao do aparelho nao participa desta leitura.
 	var packet_keys := [
 		"st310_raw_packet", "st310_packet", "raw_packet", "rawPacket",

@@ -179,8 +179,8 @@ func _run(job: Dictionary) -> void:
 			)
 			# Arquivo legado mantido como compatibilidade defensiva. Se ele for
 			# carregado por engano, Cadastro segue a mesma regra do controller
-			# atual: API confirmada -> Store local -> Firebase confirmado. Sem a
-			# leitura Firebase, a fila fica pendente e nunca exibe sucesso falso.
+			# atual: API confirmada -> Store local -> Banco local SQL confirmado. Sem a
+			# leitura Banco local SQL, a fila fica pendente e nunca exibe sucesso falso.
 			if registration_confirmation_pending:
 				result = {
 					"ok": false,
@@ -194,15 +194,15 @@ func _run(job: Dictionary) -> void:
 					result = {"ok": false, "message": str(local_result.get("message", "Falha ao atualizar o cadastro local."))}
 				else:
 					result["local"] = local_result
-					var firebase_result: Dictionary = await host.call("_ensure_firebase_modification_saved", serial, local_result.get("product", {}) as Dictionary)
-					if not bool(firebase_result.get("ok", false)):
+					var local_database_result: Dictionary = await host.call("_ensure_local_database_modification_saved", serial, local_result.get("product", {}) as Dictionary)
+					if not bool(local_database_result.get("ok", false)):
 						result = {
 							"ok": false,
-							"message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao do cadastro.")),
-							"firebase_pending": true,
+							"message": str(local_database_result.get("message", "O Banco local SQL nao confirmou a gravacao do cadastro.")),
+							"local_database_pending": true,
 						}
 					else:
-						result["firebase"] = firebase_result
+						result["local_database"] = local_database_result
 	else:
 		_update(id, "Consultando o aparelho", "API principal")
 		result = await host.call("_perform_equipment_modification", request, null)
@@ -215,17 +215,17 @@ func _run(job: Dictionary) -> void:
 				if not bool(local_modification.get("ok", false)):
 					result = {"ok": false, "message": str(local_modification.get("message", "Falha ao atualizar o cadastro local."))}
 				else:
-					var firebase_result: Dictionary = await host.call("_ensure_firebase_modification_saved", serial, local_modification.get("product", {}) as Dictionary)
-					if not bool(firebase_result.get("ok", false)):
-						result = {"ok": false, "message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao da modificacao.")), "firebase_pending": true}
+					var local_database_result: Dictionary = await host.call("_ensure_local_database_modification_saved", serial, local_modification.get("product", {}) as Dictionary)
+					if not bool(local_database_result.get("ok", false)):
+						result = {"ok": false, "message": str(local_database_result.get("message", "O Banco local SQL nao confirmou a gravacao da modificacao.")), "local_database_pending": true}
 					else:
-						result["firebase"] = firebase_result
+						result["local_database"] = local_database_result
 	if bool(result.get("ok", false)):
 		_finish(id, true, "Confirmado | %s" % ("cadastro e vinculo" if kind == "Cadastro" else "dados sincronizados"), "Fallback web" if bool(result.get("web", false)) else "API principal")
 		host.call("_log_system_action", "Operacao remota concluida", "%s | Serie: %s" % [kind, serial], serial)
 	else:
 		var message := str(result.get("message", "A operacao remota nao foi confirmada."))
-		_finish(id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API principal", "pending" if bool(result.get("firebase_pending", false)) or bool(result.get("confirmation_pending", false)) else "")
+		_finish(id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API principal", "pending" if bool(result.get("local_database_pending", false)) or bool(result.get("confirmation_pending", false)) else "")
 		host.call("_log_system_action", "Falhou operacao remota", "%s | Serie: %s" % [message, serial], serial)
 	_drain()
 

@@ -39,9 +39,9 @@ func _run() -> void:
 		await _cleanup(dashboard)
 		_finish(2)
 		return
-	var firebase_variant: Variant = await dashboard.call("observer_load_firebase_products_read_only")
-	if typeof(firebase_variant) != TYPE_DICTIONARY or not bool((firebase_variant as Dictionary).get("ok", false)):
-		_fail("firebase_products_unavailable")
+	var local_database_variant: Variant = await dashboard.call("observer_load_local_database_products_read_only")
+	if typeof(local_database_variant) != TYPE_DICTIONARY or not bool((local_database_variant as Dictionary).get("ok", false)):
+		_fail("local_database_products_unavailable")
 		_capture_observer_report(dashboard)
 		await _cleanup(dashboard)
 		_finish(2)

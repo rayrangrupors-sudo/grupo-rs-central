@@ -168,7 +168,7 @@ func _run(job: Dictionary) -> void:
 				"API principal"
 			)
 			# A API pode aceitar a solicitacao antes de confirmar a associacao.
-			# Nesse estado nao podemos gravar um produto sem placa na Firebase nem
+			# Nesse estado nao podemos gravar um produto sem placa na Banco local SQL nem
 			# emitir sucesso local. A finalizacao fica restrita ao retorno confirmado.
 			if not registration_confirmation_pending:
 				var local_result: Dictionary = await host.call("_finalize_local_equipment_registration", local_product, request)
@@ -176,18 +176,18 @@ func _run(job: Dictionary) -> void:
 					result = {"ok": false, "message": str(local_result.get("message", "Falha ao atualizar o cadastro local."))}
 				else:
 					# O upsert local emite a solicitacao de sincronizacao, mas o cadastro
-					# remoto so pode ser concluido depois que o Firebase confirmar o
+					# remoto so pode ser concluido depois que o Banco local SQL confirmar o
 					# flush e a leitura do produto. Sem esta barreira, o fluxo de
-					# Cadastro podia encerrar antes de o novo registro chegar ao Firebase.
-					var firebase_result: Dictionary = await host.call("_ensure_firebase_modification_saved", serial, local_result.get("product", {}) as Dictionary)
-					if not bool(firebase_result.get("ok", false)):
+					# Cadastro podia encerrar antes de o novo registro chegar ao Banco local SQL.
+					var local_database_result: Dictionary = await host.call("_ensure_local_database_modification_saved", serial, local_result.get("product", {}) as Dictionary)
+					if not bool(local_database_result.get("ok", false)):
 						result = {
 							"ok": false,
-							"message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao do cadastro.")),
-							"firebase_pending": true,
+							"message": str(local_database_result.get("message", "O Banco local SQL nao confirmou a gravacao do cadastro.")),
+							"local_database_pending": true,
 						}
 					else:
-						result["firebase"] = firebase_result
+						result["local_database"] = local_database_result
 	else:
 		_update(id, "Consultando o aparelho", "API principal")
 		result = await host.call("_perform_equipment_modification", request, null)
@@ -202,11 +202,11 @@ func _run(job: Dictionary) -> void:
 					# A persistencia ja foi confirmada. Atualize a tela/lista que o
 					# operador esta vendo para nao deixar o formulario com os dados
 					# antigos depois que a fila terminar.
-					var firebase_result: Dictionary = await host.call("_ensure_firebase_modification_saved", serial, local_modification.get("product", {}) as Dictionary)
-					if not bool(firebase_result.get("ok", false)):
-						result = {"ok": false, "message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao da modificacao.")), "firebase_pending": true}
+					var local_database_result: Dictionary = await host.call("_ensure_local_database_modification_saved", serial, local_modification.get("product", {}) as Dictionary)
+					if not bool(local_database_result.get("ok", false)):
+						result = {"ok": false, "message": str(local_database_result.get("message", "O Banco local SQL nao confirmou a gravacao da modificacao.")), "local_database_pending": true}
 					else:
-						result["firebase"] = firebase_result
+						result["local_database"] = local_database_result
 					if bool(result.get("ok", false)) and host.has_method("_on_remote_operation_localized"):
 						host.call_deferred("_on_remote_operation_localized", kind, serial)
 	if bool(result.get("ok", false)):
@@ -229,7 +229,7 @@ func _run(job: Dictionary) -> void:
 			false,
 			message,
 			"Fallback web" if bool(result.get("fallback_web", false)) else "API principal",
-			"pending" if bool(result.get("firebase_pending", false)) else ""
+			"pending" if bool(result.get("local_database_pending", false)) else ""
 		)
 		_log_remote_operation_event(kind, serial, result, id, started_at, false)
 	_drain()

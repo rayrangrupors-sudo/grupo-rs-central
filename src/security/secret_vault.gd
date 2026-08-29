@@ -32,21 +32,13 @@ const APP_SECRET_KEYS := [
 	"linksolutions_email",
 	"linksolutions_password",
 	"linksolutions_token",
-	"sga_rastreio_api_token",
-	"sga_rastreio_user",
-	"sga_rastreio_password",
-	"sga_rastreio_user_token",
-	"sga_protecao_api_token",
-	"sga_protecao_user",
-	"sga_protecao_password",
-	"sga_protecao_user_token",
 	"experttexting_username",
 	"experttexting_api_key",
 	"experttexting_api_secret",
 	"openai_api_key",
 ]
 
-const FIREBASE_SECRET_KEYS := [
+const BANCO_LOCAL_SQL_SECRET_KEYS := [
 	"account_email",
 	"api_key",
 	"refresh_token",
@@ -441,7 +433,7 @@ func _filter_transfer_secrets(source: Dictionary) -> Dictionary:
 	var result: Dictionary = {}
 	var namespaces := {
 		"app": APP_SECRET_KEYS,
-		"firebase": FIREBASE_SECRET_KEYS,
+		"local_database": BANCO_LOCAL_SQL_SECRET_KEYS,
 		"luna": LUNA_SECRET_KEYS,
 	}
 	for namespace_key in namespaces:

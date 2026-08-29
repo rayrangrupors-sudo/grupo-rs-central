@@ -183,7 +183,7 @@ func get_controlled_context(question: String) -> Dictionary:
 	if _settings == null or bool(_settings.get_value("context_maintenance", true)):
 		if _contains_any(normalized, ["manuten", "parado", "problema", "falha", "equipamento"]):
 			context["maintenance"] = get_maintenance_summary()
-	if _contains_any(normalized, ["sincron", "conexao", "servidor", "firebase"]):
+	if _contains_any(normalized, ["sincron", "conexao", "servidor", "local_database"]):
 		context["sync"] = get_sync_status()
 	if _runtime_context.has("selected_equipment"):
 		context["selected_equipment"] = _summarize_selected_equipment(_runtime_context["selected_equipment"])

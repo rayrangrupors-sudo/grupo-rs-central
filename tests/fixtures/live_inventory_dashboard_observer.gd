@@ -79,33 +79,33 @@ func observer_prepare_visible_inventory() -> Dictionary:
 	return {"ok": is_instance_valid(table_body)}
 
 
-func observer_load_firebase_products_read_only() -> Dictionary:
-	var firebase_sync := _firebase_sync()
-	if firebase_sync == null:
-		return {"ok": false, "reason": "firebase_unavailable"}
+func observer_load_local_database_products_read_only() -> Dictionary:
+	var local_database_sync := _local_database_sync()
+	if local_database_sync == null:
+		return {"ok": false, "reason": "local_database_unavailable"}
 	# Usa somente a leitura da filial. Nao chama refresh_remote(), pois essa
 	# rotina tambem executa a verificacao de conectividade com escrita.
-	var response_variant: Variant = await firebase_sync.call(
+	var response_variant: Variant = await local_database_sync.call(
 		"_database_request",
 		HTTPClient.METHOD_GET,
 		"branches/%s" % selected_branch_id
 	)
 	if typeof(response_variant) != TYPE_DICTIONARY:
-		return {"ok": false, "reason": "firebase_response_invalid"}
+		return {"ok": false, "reason": "local_database_response_invalid"}
 	var response := response_variant as Dictionary
 	if not bool(response.get("ok", false)):
-		return {"ok": false, "reason": "firebase_read_failed"}
-	var snapshot_variant: Variant = firebase_sync.call("_decode_remote_snapshot", response.get("data", null))
+		return {"ok": false, "reason": "local_database_read_failed"}
+	var snapshot_variant: Variant = local_database_sync.call("_decode_remote_snapshot", response.get("data", null))
 	if typeof(snapshot_variant) != TYPE_DICTIONARY:
-		return {"ok": false, "reason": "firebase_snapshot_invalid"}
+		return {"ok": false, "reason": "local_database_snapshot_invalid"}
 	var snapshot := snapshot_variant as Dictionary
 	var products_variant: Variant = snapshot.get("products", [])
 	if typeof(products_variant) != TYPE_ARRAY:
-		return {"ok": false, "reason": "firebase_products_invalid"}
+		return {"ok": false, "reason": "local_database_products_invalid"}
 	# O Store serve somente como recipiente da lista oficial de produtos/linhas.
 	# Nenhum campo de telemetria, GPS ou status e lido dele.
 	if not store.replace_from_remote(snapshot):
-		return {"ok": false, "reason": "firebase_products_not_applied"}
+		return {"ok": false, "reason": "local_database_products_not_applied"}
 	return {"ok": true, "product_rows": (products_variant as Array).size()}
 
 

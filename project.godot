@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="GRUPO RS CENTRAL"
-config/version="4.1.7"
+config/version="4.2.1"
 run/main_scene="res://scenes/estoque_profissional.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 boot_splash/bg_color=Color(0.027451, 0.227451, 0.458824, 1)
@@ -22,7 +22,7 @@ config/icon="res://assets/branding/app_icon.png"
 
 SecretVault="*res://src/security/secret_vault.gd"
 UpdateBootstrap="*res://src/update_bootstrap.gd"
-FirebaseSync="*res://src/firebase_sync.gd"
+LocalDataService="*res://src/local_data_service.gd"
 AppEventBus="*res://src/core/app_event_bus.gd"
 IntegrationManager="*res://src/integrations/integration_manager.gd"
 ModuleRegistry="*res://src/core/module_registry.gd"

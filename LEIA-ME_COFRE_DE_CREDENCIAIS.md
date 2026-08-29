@@ -1,5 +1,15 @@
 # Cofre de credenciais
 
+O acesso operacional agora usa o BancoLocalSQL Auth. A senha do operador não é
+gravada pelo aplicativo: o BancoLocalSQL mantém o hash e devolve uma sessão
+temporária após a autenticação. As credenciais das integrações são sincronizadas
+em `credentials/{filial}` no BancoLocalSQL, sob as regras e custom claims descritas
+em `docs/escopo_inicial_e_seguranca.md`.
+
+O cofre local abaixo permanece como camada de compatibilidade para refresh
+tokens e migração de instalações antigas. Ele não substitui a autorização do
+BancoLocalSQL para abrir uma filial, consultar ou modificar o estoque.
+
 As credenciais das integracoes nao ficam mais nos arquivos JSON comuns do
 Godot. Elas sao gravadas com criptografia no arquivo:
 
@@ -32,7 +42,7 @@ sem exibi-las e sem solicitar a senha de visualizacao.
   projeto.
 - Nao envie o arquivo do cofre isoladamente para outro computador. Ele nao foi
   feito para ser aberto fora da maquina autorizada.
-- Os arquivos `app_settings.json`, `firebase_sync_config.json` e
+- Os arquivos `app_settings.json`, `local_database_sync_config.json` e
   `ai_config.json` guardam somente preferencias nao sensiveis.
 
 ## Transferencia para outro computador

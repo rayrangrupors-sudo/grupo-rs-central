@@ -103,7 +103,7 @@ def test_no_live_prints_emit_raw_json_or_primary_identifiers() -> None:
     ]
     allowed_files = {
         "src/__codex_experttexting_integration_check.gd",
-        "src/__codex_firebase_sync_check.gd",
+        "src/__codex_local_database_sync_check.gd",
         "src/__codex_linksolutions_recovery_check.gd",
         "src/__codex_monitor_dashboard_check.gd",
         "src/__codex_remote_registration_catalog_check.gd",
@@ -139,7 +139,7 @@ def test_no_known_live_credentials_or_fixed_real_targets() -> None:
     allowed_files = {
         "src/__codex_assistant_chat_check.gd",
         "src/__codex_experttexting_integration_check.gd",
-        "src/__codex_firebase_sync_check.gd",
+        "src/__codex_local_database_sync_check.gd",
         "src/__codex_linksolutions_recovery_check.gd",
         "src/__codex_regional_integration_check.gd",
         "src/__codex_secret_vault_check.gd",

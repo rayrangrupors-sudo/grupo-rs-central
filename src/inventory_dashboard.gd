@@ -30,12 +30,12 @@ const StoreScript := preload("res://src/inventory_store.gd")
 const Smart4GMonitorScript := preload("res://src/smart_4g_monitor.gd")
 const AnatelCoverageScript := preload("res://src/anatel_coverage.gd")
 const GuardianScript := preload("res://src/system_guardian.gd")
-const FirebaseSyncScript := preload("res://src/firebase_sync.gd")
+const LocalDataServiceScript := preload("res://src/local_data_service.gd")
 const AppDesignSystem := preload("res://src/ui/app_design_system.gd")
 const SecretVaultScript := preload("res://src/security/secret_vault.gd")
 const LunaChatScript := preload("res://ai/luna_chat.gd")
 const LunaSettingsPanelScript := preload("res://ai/luna_settings_panel.gd")
-const LOGO_TEXTURE := preload("res://assets/branding/sos_abm_favicon.png")
+const LOGO_TEXTURE := preload("res://assets/branding/app_icon.png")
 const PROFILE_AVATAR_TEXTURE := preload("res://assets/branding/profile_avatar_preview_v5.png")
 const UI_FONT := preload("res://assets/fonts/Noto_Sans/static/NotoSans-SemiBold.ttf")
 const NAV_FONT := preload("res://assets/fonts/Noto_Sans/static/NotoSans-BoldItalic.ttf")
@@ -58,9 +58,10 @@ const CODEX_ESCALATION_API_URL := "https://api.openai.com/v1/responses"
 const CODEX_ESCALATION_DEFAULT_MODEL := "gpt-5.6"
 const CODEX_ESCALATION_MAX_OUTPUT_TOKENS := 1800
 const CODEX_ESCALATION_TIMEOUT_SECONDS := 75.0
-const DEFAULT_AUTH_USER := "Lucas"
+const DEFAULT_AUTH_USER := "lucasabm"
 const DEFAULT_AUTH_SALT := "grupo-rs-central-v1"
-const DEFAULT_AUTH_PASSWORD_HASH := "ea265c01afcf7ead18d8aef054b52c3e5d558bf1ab1605ca6f92d1feab032667"
+const DEFAULT_AUTH_PASSWORD_HASH := "8b8be979780a3d27da85579c5398e07b6acd78b73e0e6ac0c4ea8adebc78e6fc"
+const ACTIVE_SCOPE_SECTIONS := ["dashboard", "inventory", "vehicle_location", "monitor_4g", "bulk", "settings"]
 const TABLE_PAGE_SIZE := 10
 const SYSTEM_LOG_PAGE_SIZE := 20
 # A referencia visual do log usa uma lista curta de eventos recentes. Mantemos
@@ -101,6 +102,7 @@ const SGA_VISIBLE_AUTO_CONCURRENCY := 2
 const SGA_MAX_LOOKUPS_PER_SEARCH := 20
 const SGA_SOURCE_RASTREIO := "rastreio"
 const SGA_SOURCE_PROTECAO := "protecao"
+const SGA_ENABLED := false
 const LOCATION_VISIBLE_AUTO_CONCURRENCY := 2
 const LOCATION_STATUS_CACHE_SECONDS := 55
 const INTERNAL_BATTERY_REFRESH_SECONDS := 60.0
@@ -567,7 +569,7 @@ class CloudStatusDot:
 		draw_circle(size * 0.5, minf(size.x, size.y) * 0.38, dot_color)
 
 
-class FirebaseTopbarPulse:
+class BancoLocalSQLTopbarPulse:
 	extends Control
 
 	var state := "connecting"
@@ -1028,7 +1030,7 @@ var sidebar_equipment_expanded := true
 var sidebar_collapsed := false
 var current_section := "dashboard"
 var cloud_status_dot: CloudStatusDot
-var cloud_status_pulse: FirebaseTopbarPulse
+var cloud_status_pulse: BancoLocalSQLTopbarPulse
 var cloud_status_label: Label
 var cloud_status_detail_label: Label
 var cloud_status_metrics_label: Label
@@ -1036,10 +1038,10 @@ var cloud_sync_timer: Timer
 var cloud_status_probe_running := false
 var st310_location_poll_timer: Timer
 var st310_location_polling := false
-var firebase_url_input: LineEdit
-var firebase_api_key_input: LineEdit
-var firebase_refresh_token_input: LineEdit
-var firebase_config_status_label: Label
+var local_database_url_input: LineEdit
+var local_database_api_key_input: LineEdit
+var local_database_refresh_token_input: LineEdit
+var local_database_config_status_label: Label
 var online_data_available := false
 var online_unavailable_visible := false
 var current_content_allows_offline := false
@@ -1051,7 +1053,7 @@ var server_health_connection_label: Label
 var server_health_latency_label: Label
 var server_health_sync_label: Label
 var server_health_history_body: VBoxContainer
-var dashboard_firebase_history: Array[Dictionary] = []
+var dashboard_local_database_history: Array[Dictionary] = []
 var dashboard_diagnostics: Array[Dictionary] = []
 var dashboard_alert_filter := "all"
 var dashboard_alert_body: VBoxContainer
@@ -1263,6 +1265,7 @@ var login_user_input: LineEdit
 var login_password_input: LineEdit
 var login_error_label: Label
 var remember_user_check: CheckBox
+var login_attempt_running := false
 
 var search_input: LineEdit
 var status_quick_filters: HBoxContainer
@@ -1555,7 +1558,7 @@ var system_log_calendar_year_spin: SpinBox
 var system_log_calendar_title: Label
 var formatting_plate_fields := {}
 # Navegacao incremental: somente o conteudo da pagina e substituido.
-# O shell (sidebar, topbar, Firebase/status e servicos globais) permanece vivo
+# O shell (sidebar, topbar, Banco local SQL/status e servicos globais) permanece vivo
 # durante a troca de abas. O token invalida respostas atrasadas de telas antigas.
 var page_transition_id := 0
 var content_navigation_generation := 0
@@ -1708,10 +1711,10 @@ func _clear_screen() -> void:
 	cloud_status_detail_label = null
 	cloud_status_metrics_label = null
 	cloud_status_probe_running = false
-	firebase_url_input = null
-	firebase_api_key_input = null
-	firebase_refresh_token_input = null
-	firebase_config_status_label = null
+	local_database_url_input = null
+	local_database_api_key_input = null
+	local_database_refresh_token_input = null
+	local_database_config_status_label = null
 	server_health_core = null
 	server_health_state_label = null
 	server_health_detail_label = null
@@ -1719,7 +1722,7 @@ func _clear_screen() -> void:
 	server_health_latency_label = null
 	server_health_sync_label = null
 	server_health_history_body = null
-	dashboard_firebase_history.clear()
+	dashboard_local_database_history.clear()
 	dashboard_diagnostics.clear()
 	dashboard_alert_filter = "all"
 	dashboard_alert_body = null
@@ -2029,91 +2032,162 @@ func _show_branch_selector() -> void:
 
 	var background := ColorRect.new()
 	background.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	background.color = Color("#f4f7fb")
+	background.color = Color("#061d3b")
 	add_child(background)
+	_add_signal_background(background, 0.18)
 
-	var top := PanelContainer.new()
-	top.custom_minimum_size = Vector2(0, 92)
-	top.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
-	top.add_theme_stylebox_override("panel", _style_box(Color.WHITE, Color("#dbe5ef"), 1, 0))
-	add_child(top)
+	var shell := MarginContainer.new()
+	shell.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	shell.add_theme_constant_override("margin_left", 24)
+	shell.add_theme_constant_override("margin_right", 24)
+	shell.add_theme_constant_override("margin_top", 10)
+	shell.add_theme_constant_override("margin_bottom", 10)
+	add_child(shell)
+	var shell_stack := VBoxContainer.new()
+	shell_stack.add_theme_constant_override("separation", 14)
+	shell.add_child(shell_stack)
 
-	var top_center := CenterContainer.new()
-	top.add_child(top_center)
-
-	var logo := TextureRect.new()
-	logo.texture = LOGO_TEXTURE
-	logo.custom_minimum_size = Vector2(72, 72)
-	logo.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
-	logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	top_center.add_child(logo)
-
-	var center := MarginContainer.new()
-	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	center.add_theme_constant_override("margin_left", 74)
-	center.add_theme_constant_override("margin_right", 74)
-	center.add_theme_constant_override("margin_top", 136)
-	center.add_theme_constant_override("margin_bottom", 44)
-	add_child(center)
-
-	var stack := VBoxContainer.new()
-	stack.add_theme_constant_override("separation", 22)
-	center.add_child(stack)
-
-	var heading_row := HBoxContainer.new()
-	heading_row.custom_minimum_size = Vector2(0, 82)
-	heading_row.add_theme_constant_override("separation", 28)
-	stack.add_child(heading_row)
-
-	var heading := VBoxContainer.new()
-	heading.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	heading.add_theme_constant_override("separation", 4)
-	heading_row.add_child(heading)
-
-	var title := Label.new()
-	title.text = "Selecionar base"
-	title.add_theme_font_override("font", UI_FONT)
-	title.add_theme_font_size_override("font_size", 38)
-	title.add_theme_color_override("font_color", TEXT)
-	heading.add_child(title)
-
-	var subtitle := Label.new()
-	subtitle.text = "Escolha a base operacional."
-	subtitle.add_theme_font_override("font", UI_FONT)
-	subtitle.add_theme_font_size_override("font_size", 18)
-	subtitle.add_theme_color_override("font_color", MUTED)
-	heading.add_child(subtitle)
-
-	# A referência reserva este espaço para a composição principal e concentra
-	# a informação de conectividade no resumo lateral. Mantemos apenas o
-	# rótulo em memória para o resumo/telemetria, sem renderizar um badge extra.
-	branch_selector_online_badge_label = Label.new()
-	branch_selector_online_badge_label.text = "●  4 bases online"
-	branch_selector_online_badge_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	branch_selector_online_badge_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	branch_selector_online_badge_label.add_theme_font_override("font", UI_FONT)
-	branch_selector_online_badge_label.add_theme_font_size_override("font_size", 14)
-	branch_selector_online_badge_label.add_theme_color_override("font_color", Color("#149b61"))
+	var top := HBoxContainer.new()
+	top.custom_minimum_size = Vector2(0, 56)
+	top.add_theme_constant_override("separation", 14)
+	shell_stack.add_child(top)
+	var old_logo := TextureRect.new()
+	old_logo.texture = LOGO_TEXTURE
+	old_logo.custom_minimum_size = Vector2(50, 50)
+	old_logo.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+	old_logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	top.add_child(old_logo)
+	var old_logo_label := Label.new()
+	old_logo_label.text = "GRUPO RS CENTRAL"
+	old_logo_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	old_logo_label.add_theme_font_override("font", UI_FONT)
+	old_logo_label.add_theme_font_size_override("font_size", 18)
+	old_logo_label.add_theme_color_override("font_color", Color.WHITE)
+	top.add_child(old_logo_label)
+	var top_spacer := Control.new()
+	top_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top.add_child(top_spacer)
+	var top_hint := Label.new()
+	top_hint.text = "SISTEMA OPERACIONAL"
+	top_hint.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	top_hint.add_theme_font_override("font", UI_FONT)
+	top_hint.add_theme_font_size_override("font_size", 12)
+	top_hint.add_theme_color_override("font_color", Color("#b9cceb"))
+	top.add_child(top_hint)
 
 	var body := HBoxContainer.new()
-	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	body.add_theme_constant_override("separation", 136)
-	stack.add_child(body)
+	body.add_theme_constant_override("separation", 0)
+	shell_stack.add_child(body)
+	var sos_panel := PanelContainer.new()
+	sos_panel.custom_minimum_size = Vector2(470, 0)
+	sos_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	sos_panel.add_theme_stylebox_override("panel", _style_box(Color("#082a54"), Color("#1e6db1"), 1, 22, true))
+	body.add_child(sos_panel)
+	var sos_stack := VBoxContainer.new()
+	sos_stack.alignment = BoxContainer.ALIGNMENT_CENTER
+	sos_stack.add_theme_constant_override("separation", 10)
+	sos_panel.add_child(sos_stack)
+	var sos_logo := TextureRect.new()
+	sos_logo.texture = preload("res://assets/branding/sos_abm_favicon.png")
+	sos_logo.custom_minimum_size = Vector2(270, 270)
+	sos_logo.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+	sos_logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	sos_stack.add_child(sos_logo)
+	# Pequenos acentos em laranja queimado equilibram o azul do painel sem
+	# competir com as cores mais vivas da marca.
+	var sos_accent := HBoxContainer.new()
+	sos_accent.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sos_accent.alignment = BoxContainer.ALIGNMENT_CENTER
+	sos_accent.add_theme_constant_override("separation", 8)
+	sos_stack.add_child(sos_accent)
+	var sos_line_left := ColorRect.new()
+	sos_line_left.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sos_line_left.custom_minimum_size = Vector2(64, 2)
+	sos_line_left.color = Color("#d89142")
+	sos_accent.add_child(sos_line_left)
+	var sos_dot := PanelContainer.new()
+	sos_dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sos_dot.custom_minimum_size = Vector2(7, 7)
+	sos_dot.add_theme_stylebox_override("panel", _style_box(Color("#d89142"), Color("#d89142"), 0, 4))
+	sos_accent.add_child(sos_dot)
+	var sos_line_right := ColorRect.new()
+	sos_line_right.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sos_line_right.custom_minimum_size = Vector2(64, 2)
+	sos_line_right.color = Color("#d89142")
+	sos_accent.add_child(sos_line_right)
+	var sos_title := Label.new()
+	sos_title.text = "SOS PROTEÇÃO VEICULAR"
+	sos_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sos_title.add_theme_font_override("font", preload("res://assets/fonts/Noto_Sans/static/NotoSans_ExtraCondensed-Black.ttf"))
+	sos_title.add_theme_font_size_override("font_size", 18)
+	sos_title.add_theme_color_override("font_color", Color.WHITE)
+	sos_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	sos_title.custom_minimum_size = Vector2(0, 28)
+	sos_stack.add_child(sos_title)
+	var sos_subtitle := Label.new()
+	sos_subtitle.text = ""
+	sos_subtitle.visible = false
+	sos_subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sos_subtitle.add_theme_font_override("font", UI_FONT)
+	sos_subtitle.add_theme_font_size_override("font_size", 14)
+	sos_subtitle.add_theme_color_override("font_color", Color("#dce8f7"))
+	sos_stack.add_child(sos_subtitle)
+	var sidera_brand := PanelContainer.new()
+	sidera_brand.custom_minimum_size = Vector2(260, 72)
+	sidera_brand.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	sidera_brand.add_theme_stylebox_override("panel", _style_box(Color(0, 0, 0, 0), Color(0, 0, 0, 0), 0, 0))
+	sos_stack.add_child(sidera_brand)
+	var sidera_logo := TextureRect.new()
+	sidera_logo.texture = preload("res://assets/branding/sideracode_logo_final2.png")
+	sidera_logo.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	sidera_logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	sidera_logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	sidera_brand.add_child(sidera_logo)
+
+	var right_panel := PanelContainer.new()
+	right_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	right_panel.add_theme_stylebox_override("panel", _style_box(Color("#092b56"), Color("#1e6db1"), 1, 22, true))
+	body.add_child(right_panel)
+	var right_margin := MarginContainer.new()
+	right_margin.add_theme_constant_override("margin_left", 42)
+	right_margin.add_theme_constant_override("margin_right", 42)
+	right_margin.add_theme_constant_override("margin_top", 24)
+	right_margin.add_theme_constant_override("margin_bottom", 12)
+	right_panel.add_child(right_margin)
+	var right_stack := VBoxContainer.new()
+	right_stack.add_theme_constant_override("separation", 8)
+	right_margin.add_child(right_stack)
+	var title := Label.new()
+	title.text = "GRUPO RS CENTRAL"
+	title.add_theme_font_override("font", UI_FONT)
+	title.add_theme_font_size_override("font_size", 36)
+	title.add_theme_color_override("font_color", Color.WHITE)
+	right_stack.add_child(title)
+	var subtitle := Label.new()
+	subtitle.text = "Gestão de rastreadores e estoque"
+	subtitle.add_theme_font_override("font", UI_FONT)
+	subtitle.add_theme_font_size_override("font_size", 18)
+	subtitle.add_theme_color_override("font_color", Color("#c9d8ed"))
+	right_stack.add_child(subtitle)
+	var accent := ColorRect.new()
+	accent.custom_minimum_size = Vector2(120, 4)
+	accent.color = ORANGE
+	right_stack.add_child(accent)
+	branch_selector_online_badge_label = Label.new()
+	branch_selector_online_badge_label.text = "○  Bases disponíveis"
+	branch_selector_online_badge_label.add_theme_font_override("font", UI_FONT)
+	branch_selector_online_badge_label.add_theme_font_size_override("font_size", 13)
+	branch_selector_online_badge_label.add_theme_color_override("font_color", Color("#b9cceb"))
 
 	var grid := GridContainer.new()
-	grid.columns = 2
-	# A referência usa dois cartões largos (474 px cada) em vez de
-	# deixar o GridContainer decidir uma largura mínima zero. Quando a
-	# largura fica zero, o Godot comprime cada célula e os conteúdos se
-	# sobrepõem. Mantemos a geometria da prévia e deixamos o espaço
-	# excedente fora do conjunto, sem alterar o fluxo de seleção.
-	grid.custom_minimum_size = Vector2(968, 0)
-	grid.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
-	grid.add_theme_constant_override("h_separation", 20)
-	grid.add_theme_constant_override("v_separation", 20)
-	body.add_child(grid)
-
+	# Os cartoes seguem a referencia visual: quatro bases alinhadas em uma unica
+	# faixa. O restante da tela e mantido intacto.
+	grid.columns = 4
+	grid.add_theme_constant_override("h_separation", 18)
+	grid.add_theme_constant_override("v_separation", 18)
+	right_stack.add_child(grid)
 	for config in _branch_configs():
 		var branch_id := str(config.get("id", ""))
 		var branch_name := str(config.get("name", ""))
@@ -2121,152 +2195,12 @@ func _show_branch_selector() -> void:
 		var color: Color = config.get("color", ORANGE)
 		grid.add_child(_make_branch_button(branch_name, color, enabled, branch_id))
 
-	var summary_card := PanelContainer.new()
-	# Largura equivalente ao painel da prévia (aprox. 440 px).
-	summary_card.custom_minimum_size = Vector2(440, 0)
-	summary_card.size_flags_horizontal = Control.SIZE_SHRINK_END
-	summary_card.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	summary_card.add_theme_stylebox_override("panel", _style_box(Color.WHITE, Color("#dbe5ef"), 1, 14, true))
-	body.add_child(summary_card)
+	# A area inferior fica limpa, somente com o fundo azul do painel.
+	branch_summary_count_label = null
+	branch_summary_last_sync_label = null
 
-	var summary_root := VBoxContainer.new()
-	summary_root.add_theme_constant_override("separation", 0)
-	summary_card.add_child(summary_root)
-
-	var summary_header := PanelContainer.new()
-	summary_header.custom_minimum_size = Vector2(0, 74)
-	summary_header.add_theme_stylebox_override("panel", _style_box(Color("#103d61"), Color("#103d61"), 0, 14, false))
-	summary_root.add_child(summary_header)
-	var summary_header_margin := MarginContainer.new()
-	summary_header_margin.add_theme_constant_override("margin_left", 26)
-	summary_header_margin.add_theme_constant_override("margin_right", 20)
-	summary_header_margin.add_theme_constant_override("margin_top", 12)
-	summary_header_margin.add_theme_constant_override("margin_bottom", 12)
-	summary_header.add_child(summary_header_margin)
-	var summary_header_row := HBoxContainer.new()
-	summary_header_row.add_theme_constant_override("separation", 10)
-	summary_header_margin.add_child(summary_header_row)
-	var summary_title := Label.new()
-	summary_title.text = "Resumo da operação"
-	summary_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	summary_title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	summary_title.add_theme_font_override("font", UI_FONT)
-	summary_title.add_theme_font_size_override("font_size", 20)
-	summary_title.add_theme_color_override("font_color", Color.WHITE)
-	summary_header_row.add_child(summary_title)
-	var summary_logo := TextureRect.new()
-	summary_logo.texture = LOGO_TEXTURE
-	summary_logo.custom_minimum_size = Vector2(44, 44)
-	summary_logo.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
-	summary_logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	summary_header_row.add_child(summary_logo)
-
-	var summary_margin := MarginContainer.new()
-	summary_margin.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	summary_margin.add_theme_constant_override("margin_left", 26)
-	summary_margin.add_theme_constant_override("margin_right", 26)
-	summary_margin.add_theme_constant_override("margin_top", 24)
-	summary_margin.add_theme_constant_override("margin_bottom", 22)
-	summary_root.add_child(summary_margin)
-
-	var summary_stack := VBoxContainer.new()
-	summary_stack.add_theme_constant_override("separation", 14)
-	summary_margin.add_child(summary_stack)
-
-	var summary_rule := ColorRect.new()
-	summary_rule.custom_minimum_size = Vector2(0, 1)
-	summary_rule.color = Color("#e4ebf2")
-	summary_stack.add_child(summary_rule)
-
-	branch_summary_count_label = Label.new()
-	branch_summary_count_label.text = "●  0 bases online"
-	branch_summary_count_label.add_theme_font_override("font", UI_FONT)
-	branch_summary_count_label.add_theme_font_size_override("font_size", 21)
-	branch_summary_count_label.add_theme_color_override("font_color", Color("#149b61"))
-	summary_stack.add_child(branch_summary_count_label)
-
-	branch_summary_last_sync_label = Label.new()
-	branch_summary_last_sync_label.text = "◷  Última sincronização: aguardando seleção"
-	branch_summary_last_sync_label.add_theme_font_override("font", UI_FONT)
-	branch_summary_last_sync_label.add_theme_font_size_override("font_size", 14)
-	branch_summary_last_sync_label.add_theme_color_override("font_color", MUTED)
-	summary_stack.add_child(branch_summary_last_sync_label)
-
-	var summary_hint := Label.new()
-	summary_hint.text = "A sincronização automática começa ao abrir o sistema."
-	summary_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	summary_hint.add_theme_font_override("font", UI_FONT)
-	summary_hint.add_theme_font_size_override("font_size", 12)
-	summary_hint.add_theme_color_override("font_color", MUTED)
-	summary_stack.add_child(summary_hint)
-
-	var status_rule := ColorRect.new()
-	status_rule.custom_minimum_size = Vector2(0, 1)
-	status_rule.color = Color("#e4ebf2")
-	summary_stack.add_child(status_rule)
-
-	for config in _branch_configs():
-		var branch_id := str(config.get("id", ""))
-		var branch_name := str(config.get("name", ""))
-		var color: Color = config.get("color", ORANGE)
-		var status_row := HBoxContainer.new()
-		status_row.custom_minimum_size = Vector2(0, 58)
-		status_row.add_theme_constant_override("separation", 12)
-		var summary_mark := PanelContainer.new()
-		summary_mark.custom_minimum_size = Vector2(46, 46)
-		summary_mark.add_theme_stylebox_override("panel", _style_box(color.lightened(0.86), color.lightened(0.86), 0, 10))
-		status_row.add_child(summary_mark)
-		var summary_mark_label := Label.new()
-		summary_mark_label.text = branch_id.substr(0, 2).to_upper()
-		summary_mark_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		summary_mark_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		summary_mark_label.add_theme_font_override("font", UI_FONT)
-		summary_mark_label.add_theme_font_size_override("font_size", 15)
-		summary_mark_label.add_theme_color_override("font_color", color)
-		summary_mark.add_child(summary_mark_label)
-		var summary_text_stack := VBoxContainer.new()
-		summary_text_stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		summary_text_stack.alignment = BoxContainer.ALIGNMENT_CENTER
-		summary_text_stack.add_theme_constant_override("separation", 2)
-		status_row.add_child(summary_text_stack)
-		var summary_name := Label.new()
-		summary_name.text = _branch_display_name(branch_id, branch_name)
-		summary_name.add_theme_font_override("font", UI_FONT)
-		summary_name.add_theme_font_size_override("font_size", 15)
-		summary_name.add_theme_color_override("font_color", TEXT)
-		summary_text_stack.add_child(summary_name)
-		var summary_status := Label.new()
-		summary_status.text = "Aguardando"
-		summary_status.add_theme_font_override("font", UI_FONT)
-		summary_status.add_theme_font_size_override("font_size", 13)
-		summary_status.add_theme_color_override("font_color", MUTED)
-		summary_text_stack.add_child(summary_status)
-		var summary_dot := Label.new()
-		summary_dot.text = "●"
-		summary_dot.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		summary_dot.add_theme_font_override("font", UI_FONT)
-		summary_dot.add_theme_font_size_override("font_size", 20)
-		summary_dot.add_theme_color_override("font_color", MUTED)
-		status_row.add_child(summary_dot)
-		branch_summary_status_labels[branch_id] = summary_status
-		branch_summary_dot_labels[branch_id] = summary_dot
-		summary_stack.add_child(status_row)
-
-	var footer_rule := ColorRect.new()
-	footer_rule.custom_minimum_size = Vector2(0, 1)
-	footer_rule.color = Color("#dbe5ef")
-	stack.add_child(footer_rule)
-
-	var footer := Label.new()
-	footer.text = "GRUPO RS CENTRAL  |  Acesso operacional por base"
-	footer.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	footer.add_theme_font_override("font", UI_FONT)
-	footer.add_theme_font_size_override("font_size", 12)
-	footer.add_theme_color_override("font_color", MUTED)
-	stack.add_child(footer)
 
 	_update_branch_selector_visuals()
-	_animate_screen_card(summary_card, stack)
 	# A primeira base habilitada é a base operacional padrão. Iniciamos a
 	# pré-sincronização depois que os cartões existem para que o usuário veja
 	# imediatamente o estado Conectando/Sincronizando, sem precisar clicar.
@@ -2289,10 +2223,9 @@ func _make_branch_button(text_value: String, fill: Color, enabled: bool, branch_
 	var button := Button.new()
 	button.text = text_value
 	button.disabled = not enabled
-	# 474 x 210 mantém o cartão na mesma proporção da prévia. A largura
-	# explícita é essencial: sem ela o GridContainer comprimirá o cartão
-	# para o menor conteúdo e causará sobreposição.
-	button.custom_minimum_size = Vector2(474, 208)
+	# Cartao visual inspirado na referencia: icone destacado, nome centralizado
+	# e os dois pequenos tracados azul/laranja abaixo do nome.
+	button.custom_minimum_size = Vector2(220, 398)
 	button.add_theme_font_override("font", UI_FONT)
 	button.add_theme_color_override("font_color", Color(1, 1, 1, 0))
 	button.add_theme_color_override("font_hover_color", Color(1, 1, 1, 0))
@@ -2306,93 +2239,115 @@ func _make_branch_button(text_value: String, fill: Color, enabled: bool, branch_
 
 	var margin := MarginContainer.new()
 	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	margin.add_theme_constant_override("margin_left", 30)
-	margin.add_theme_constant_override("margin_right", 28)
-	margin.add_theme_constant_override("margin_top", 28)
-	margin.add_theme_constant_override("margin_bottom", 28)
+	margin.add_theme_constant_override("margin_left", 14)
+	margin.add_theme_constant_override("margin_right", 14)
+	margin.add_theme_constant_override("margin_top", 16)
+	margin.add_theme_constant_override("margin_bottom", 14)
 	button.add_child(margin)
 
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 18)
+	var row := VBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 9)
 	margin.add_child(row)
 
-	var mark := PanelContainer.new()
-	mark.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	mark.custom_minimum_size = Vector2(84, 100)
-	mark.add_theme_stylebox_override("panel", _style_box(fill.lightened(0.86), fill.lightened(0.86), 0, 10))
-	row.add_child(mark)
-
-	var mark_label := Label.new()
-	mark_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	mark_label.text = branch_id.substr(0, mini(2, branch_id.length())).to_upper()
-	mark_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	mark_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	mark_label.add_theme_font_override("font", UI_FONT)
-	mark_label.add_theme_font_size_override("font_size", 24)
-	mark_label.add_theme_color_override("font_color", fill)
-	mark.add_child(mark_label)
-
-	var text_stack := VBoxContainer.new()
-	text_stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	text_stack.add_theme_constant_override("separation", 10)
-	text_stack.mouse_filter = Control.MOUSE_FILTER_PASS
-	row.add_child(text_stack)
+	var icon_card := PanelContainer.new()
+	icon_card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	icon_card.custom_minimum_size = Vector2(132, 132)
+	icon_card.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	icon_card.add_theme_stylebox_override("panel", _style_box(Color("#eaf1fc"), Color("#eaf1fc"), 0, 47))
+	row.add_child(icon_card)
+	var icon_margin := MarginContainer.new()
+	icon_margin.add_theme_constant_override("margin_left", 23)
+	icon_margin.add_theme_constant_override("margin_right", 23)
+	icon_margin.add_theme_constant_override("margin_top", 23)
+	icon_margin.add_theme_constant_override("margin_bottom", 23)
+	icon_card.add_child(icon_margin)
+	var branch_icon := TextureRect.new()
+	branch_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var icon_path := "res://assets/branding/branch_icons/imperatriz.svg"
+	match branch_id:
+		"imperatriz": icon_path = "res://assets/branding/branch_icons/imperatriz.svg"
+		"araguaina": icon_path = "res://assets/branding/branch_icons/araguaina.svg"
+		"acailandia": icon_path = "res://assets/branding/branch_icons/acailandia.svg"
+		"maraba": icon_path = "res://assets/branding/branch_icons/maraba.svg"
+	branch_icon.texture = load(icon_path)
+	# Padroniza os icones no azul da referencia, inclusive quando o SVG original
+	# usa branco ou preto e perderia contraste no circulo claro.
+	branch_icon.modulate = Color("#1d58b6")
+	branch_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	branch_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon_margin.add_child(branch_icon)
 
 	var title := Label.new()
 	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	title.text = _branch_display_name(branch_id, text_value)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	title.custom_minimum_size = Vector2(0, 28)
 	title.add_theme_font_override("font", UI_FONT)
-	title.add_theme_font_size_override("font_size", 24)
+	title.add_theme_font_size_override("font_size", 23)
 	title.add_theme_color_override("font_color", TEXT)
-	text_stack.add_child(title)
+	row.add_child(title)
 
-	var status_pill := PanelContainer.new()
-	status_pill.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	status_pill.custom_minimum_size = Vector2(100, 34)
-	status_pill.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	status_pill.add_theme_stylebox_override("panel", _style_box(Color("#edf8f2"), Color("#c4e8d3"), 1, 16))
-	text_stack.add_child(status_pill)
-	var status_label := Label.new()
-	status_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	status_label.text = "● Aguardando"
-	status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	status_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	status_label.add_theme_font_override("font", UI_FONT)
-	status_label.add_theme_font_size_override("font_size", 13)
-	status_label.add_theme_color_override("font_color", MUTED)
-	status_pill.add_child(status_label)
-
-	var hint := Label.new()
-	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hint.text = "Base sincronizada"
-	# O texto muda durante a pré-sincronização. Limite-o ao espaço
-	# disponível para que nunca altere a largura do cartão nem empurre
-	# o botão Entrar para fora da borda.
-	hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hint.custom_minimum_size = Vector2(0, 18)
-	hint.clip_text = true
-	hint.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	hint.add_theme_font_override("font", UI_FONT)
-	hint.add_theme_font_size_override("font_size", 14)
-	hint.add_theme_color_override("font_color", ORANGE)
-	text_stack.add_child(hint)
-
-	var actions := VBoxContainer.new()
-	actions.alignment = BoxContainer.ALIGNMENT_CENTER
-	row.add_child(actions)
+	var decoration := HBoxContainer.new()
+	decoration.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	decoration.alignment = BoxContainer.ALIGNMENT_CENTER
+	decoration.add_theme_constant_override("separation", 7)
+	row.add_child(decoration)
+	var blue_line := ColorRect.new()
+	blue_line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	blue_line.custom_minimum_size = Vector2(62, 6)
+	blue_line.color = Color("#173b91")
+	decoration.add_child(blue_line)
+	var orange_dot := PanelContainer.new()
+	orange_dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	orange_dot.custom_minimum_size = Vector2(10, 10)
+	orange_dot.add_theme_stylebox_override("panel", _style_box(ORANGE, ORANGE, 0, 4))
+	decoration.add_child(orange_dot)
 
 	var enter := Button.new()
 	enter.text = "Entrar"
-	enter.custom_minimum_size = Vector2(95, 50)
+	enter.custom_minimum_size = Vector2(148, 44)
+	enter.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	enter.add_theme_font_override("font", UI_FONT)
-	enter.add_theme_font_size_override("font_size", 18)
+	enter.add_theme_font_size_override("font_size", 15)
 	enter.add_theme_color_override("font_color", Color.WHITE)
 	enter.add_theme_color_override("font_hover_color", Color.WHITE)
 	enter.add_theme_stylebox_override("normal", _style_box(Color("#123f64"), Color("#123f64"), 0, 8))
 	enter.add_theme_stylebox_override("hover", _style_box(Color("#0d3150"), Color("#0d3150"), 0, 8, true))
 	enter.add_theme_stylebox_override("pressed", _style_box(Color("#092a45"), Color("#092a45"), 0, 8))
 	enter.disabled = not enabled
-	actions.add_child(enter)
+	row.add_child(enter)
+
+	var details := HBoxContainer.new()
+	details.alignment = BoxContainer.ALIGNMENT_CENTER
+	details.add_theme_constant_override("separation", 8)
+	row.add_child(details)
+	var status_pill := PanelContainer.new()
+	status_pill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	status_pill.custom_minimum_size = Vector2(160, 29)
+	status_pill.add_theme_stylebox_override("panel", _style_box(Color("#edf8f2"), Color("#c4e8d3"), 1, 16))
+	details.add_child(status_pill)
+	var status_label := Label.new()
+	status_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	status_label.text = "● Aguardando"
+	status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	status_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	status_label.add_theme_font_override("font", UI_FONT)
+	status_label.add_theme_font_size_override("font_size", 9)
+	status_label.add_theme_color_override("font_color", MUTED)
+	status_pill.add_child(status_label)
+	var hint := Label.new()
+	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hint.text = "Base sincronizada"
+	hint.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hint.clip_text = true
+	hint.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	hint.add_theme_font_override("font", UI_FONT)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.add_theme_color_override("font_color", ORANGE)
+	details.add_child(hint)
 
 	button.pressed.connect(Callable(self, "_select_branch").bind(branch_id))
 	if enabled:
@@ -2423,6 +2378,9 @@ func _select_branch(branch_id: String, from_auto_preview: bool = false) -> void:
 	selected_branch_grupo_rs_mode = str(config.get("grupo_rs_mode", "modern"))
 	selected_branch_grupo_rs_base_url = str(config.get("grupo_rs_base_url", GRUPO_RS_BASE_URL))
 	selected_branch_grupo_rs_platform_url = str(config.get("grupo_rs_platform_url", selected_branch_grupo_rs_base_url))
+	# Nunca reutilizar o preview de outra filial ao confirmar a entrada.
+	selected_branch_preview_store = null
+	selected_branch_preview_branch_id = ""
 	selected_status_filter_key = "all"
 	table_current_page = 0
 	# Nenhum dado operacional deve atravessar a troca de base.
@@ -2461,7 +2419,10 @@ func _select_branch(branch_id: String, from_auto_preview: bool = false) -> void:
 
 
 func _enter_selected_branch(branch_id: String) -> void:
-	if selected_branch_id != branch_id:
+	# O cartão já carregou a base para a prévia. Reaplicar a mesma filial aqui
+	# descartava esse Store e bloqueava a interface numa segunda leitura completa.
+	# Uma filial diferente ainda percorre toda a seleção e limpeza de contexto.
+	if branch_id != selected_branch_id:
 		_select_branch(branch_id)
 	_show_waiting_screen()
 
@@ -2501,21 +2462,21 @@ func _start_branch_preview_sync(branch_id: String, config: Dictionary) -> void:
 		"message": "Iniciando pré-sincronização...",
 		"last_sync_at": "",
 	}
-	var firebase_sync := _firebase_sync()
-	if firebase_sync == null:
-		branch_preview_sync_states[branch_id] = {"state": "error", "message": "Firebase indisponível."}
+	var local_database_sync := _local_database_sync()
+	if local_database_sync == null:
+		branch_preview_sync_states[branch_id] = {"state": "error", "message": "Banco local indisponível."}
 		return
 	var status_callable := Callable(self, "_on_branch_preview_status_changed")
-	if not firebase_sync.is_connected("status_changed", status_callable):
-		firebase_sync.connect("status_changed", status_callable)
-	firebase_sync.call("bind_store", selected_branch_preview_store, branch_id)
-	call_deferred("_finish_branch_preview_sync", firebase_sync, branch_id, generation)
+	if not local_database_sync.is_connected("status_changed", status_callable):
+		local_database_sync.connect("status_changed", status_callable)
+	local_database_sync.call("bind_store", selected_branch_preview_store, branch_id)
+	call_deferred("_finish_branch_preview_sync", local_database_sync, branch_id, generation)
 
 
-func _finish_branch_preview_sync(firebase_sync: Node, branch_id: String, generation: int) -> void:
-	if firebase_sync == null or not is_instance_valid(firebase_sync):
+func _finish_branch_preview_sync(local_database_sync: Node, branch_id: String, generation: int) -> void:
+	if local_database_sync == null or not is_instance_valid(local_database_sync):
 		return
-	var result: Variant = await firebase_sync.call("refresh_remote")
+	var result: Variant = await local_database_sync.call("refresh_remote")
 	if generation != branch_preview_generation or branch_id != selected_branch_id:
 		return
 	if typeof(result) == TYPE_DICTIONARY:
@@ -2543,6 +2504,8 @@ func _branch_preview_status_text(branch_id: String) -> String:
 			return "Sincronizando"
 		"offline":
 			return "Offline"
+		"auth_required":
+			return "Login requerido"
 		"error", "auth_error", "conflict":
 			return "Atenção"
 		_:
@@ -2555,9 +2518,11 @@ func _branch_preview_hint(branch_id: String) -> String:
 		"synced", "online":
 			return "Base sincronizada"
 		"connecting", "syncing", "pending":
-			return "Firebase preparando os dados..."
+			return "Banco local preparando os dados..."
 		"offline":
 			return "Sem conexão; tente novamente"
+		"auth_required":
+			return "Informe o usuario e a senha do sistema"
 		"error", "auth_error", "conflict":
 			return str(status.get("message", "Não foi possível sincronizar.")).strip_edges()
 		_:
@@ -2580,11 +2545,11 @@ func _update_branch_selector_visuals() -> void:
 		if summary_status is Label:
 			var summary_online := state in ["synced", "online"]
 			(summary_status as Label).text = "Base sincronizada" if summary_online else _branch_preview_status_text(branch_id)
-			(summary_status as Label).add_theme_color_override("font_color", Color("#60758d") if summary_online else (ORANGE if state in ["connecting", "syncing", "pending"] else MUTED))
+			(summary_status as Label).add_theme_color_override("font_color", Color("#60758d") if summary_online else (ORANGE if state in ["connecting", "syncing", "pending", "auth_required"] else MUTED))
 		var summary_dot: Variant = branch_summary_dot_labels.get(branch_id)
 		if summary_dot is Label:
 			(summary_dot as Label).text = "●"
-			(summary_dot as Label).add_theme_color_override("font_color", Color("#16a05f") if state in ["synced", "online"] else (ORANGE if state in ["connecting", "syncing", "pending"] else MUTED))
+			(summary_dot as Label).add_theme_color_override("font_color", Color("#16a05f") if state in ["synced", "online"] else (ORANGE if state in ["connecting", "syncing", "pending", "auth_required"] else MUTED))
 		var entry: Dictionary = branch_card_entries.get(branch_id, {})
 		if entry.is_empty():
 			continue
@@ -2597,7 +2562,7 @@ func _update_branch_selector_visuals() -> void:
 		var status_panel: PanelContainer = entry.get("status_panel")
 		var status_text := _branch_preview_status_text(branch_id)
 		status_label.text = "● %s" % status_text
-		var status_color := Color("#149b61") if state in ["synced", "online"] else (ORANGE if state in ["connecting", "syncing", "pending"] else MUTED)
+		var status_color := Color("#149b61") if state in ["synced", "online"] else (ORANGE if state in ["connecting", "syncing", "pending", "auth_required"] else MUTED)
 		status_label.add_theme_color_override("font_color", status_color)
 		status_panel.add_theme_stylebox_override("panel", _style_box(Color(status_color.r, status_color.g, status_color.b, 0.10), Color(status_color.r, status_color.g, status_color.b, 0.28), 1, 14))
 		var hint_label: Label = entry.get("hint_label")
@@ -2627,12 +2592,12 @@ func _legacy_grupo_rs_credentials_for_branch(branch_id: String, settings: Dictio
 		source = _read_json_dictionary(SETTINGS_PATH)
 	var clean_id := branch_id.strip_edges().to_lower()
 	var env_prefix := "GRUPO_RS_%s_" % clean_id.to_upper()
-	var username := OS.get_environment("%sUSER" % env_prefix).strip_edges()
-	var password := OS.get_environment("%sPASSWORD" % env_prefix)
+	var username := str(source.get(_legacy_branch_setting_key(clean_id, "user"), "")).strip_edges()
+	var password := str(source.get(_legacy_branch_setting_key(clean_id, "password"), ""))
 	if username == "":
-		username = str(source.get(_legacy_branch_setting_key(clean_id, "user"), "")).strip_edges()
+		username = OS.get_environment("%sUSER" % env_prefix).strip_edges()
 	if password == "":
-		password = str(source.get(_legacy_branch_setting_key(clean_id, "password"), ""))
+		password = OS.get_environment("%sPASSWORD" % env_prefix)
 	# Mantem compatibilidade com a configuracao antiga enquanto cada base nao for preenchida.
 	if username == "":
 		username = str(source.get("grupo_rs_legacy_user", "")).strip_edges()
@@ -2747,7 +2712,7 @@ func _branch_supports_stock_sync() -> bool:
 
 
 func _branch_supports_operational_apis() -> bool:
-	## Firebase atende o Estoque de todas as filiais. Telemetria, localização,
+	## Banco local SQL atende o Estoque de todas as filiais. Telemetria, localização,
 	## SGA, Arya, Linksolutions e demais APIs operacionais pertencem somente a
 	## Imperatriz.
 	return selected_branch_id == "imperatriz"
@@ -3142,7 +3107,7 @@ func _show_login_screen() -> void:
 	sub.add_theme_color_override("font_color", MUTED)
 	stack.add_child(sub)
 
-	login_user_input = _make_login_input("Login")
+	login_user_input = _make_login_input("Usuario autorizado no sistema")
 	login_user_input.text = _remembered_login()
 	login_user_input.text_submitted.connect(func(_value): _attempt_login())
 	stack.add_child(login_user_input)
@@ -3217,8 +3182,37 @@ func _make_login_button(text_value: String, fill: Color, font_color: Color, call
 
 
 func _attempt_login() -> void:
+	if login_attempt_running:
+		return
 	var login := login_user_input.text.strip_edges() if login_user_input else ""
-	var password := login_password_input.text.strip_edges() if login_password_input else ""
+	# A senha deve ser enviada exatamente como o operador digitou. Apenas o
+	# e-mail é normalizado; espaços podem ser parte válida de uma senha.
+	var password := login_password_input.text if login_password_input else ""
+	if login == "" or password == "":
+		if login_error_label:
+			login_error_label.text = "Informe o e-mail e a senha."
+		return
+	if _local_database_operator_auth_required():
+		login_attempt_running = true
+		if login_error_label:
+			login_error_label.text = "Validando acesso no Banco local SQL..."
+		var local_database_sync := _local_database_sync()
+		var result: Dictionary = {}
+		if local_database_sync == null:
+			result = {"ok": false, "message": "Banco local SQL indisponivel."}
+		else:
+			result = await local_database_sync.call("authenticate_operator", login, password)
+		login_attempt_running = false
+		if bool(result.get("ok", false)):
+			_update_remembered_login(login)
+			_open_selected_branch()
+			return
+		if login_error_label:
+			login_error_label.text = str(result.get("message", "Acesso recusado pelo Banco local SQL."))
+		if login_password_input:
+			login_password_input.clear()
+			login_password_input.grab_focus()
+		return
 	if _validate_login(login, password):
 		_update_remembered_login(login)
 		_open_selected_branch()
@@ -3228,6 +3222,11 @@ func _attempt_login() -> void:
 	if login_password_input:
 		login_password_input.clear()
 		login_password_input.grab_focus()
+
+
+func _local_database_operator_auth_required() -> bool:
+	var local_database_sync := _local_database_sync()
+	return local_database_sync != null and local_database_sync.has_method("is_local_database_auth_required") and bool(local_database_sync.call("is_local_database_auth_required"))
 
 
 func _validate_login(login: String, password: String) -> bool:
@@ -3297,12 +3296,18 @@ func _read_json_dictionary(path: String) -> Dictionary:
 	)
 	if sanitized != result:
 		_write_json_dictionary_raw(path, sanitized)
-	return vault.call(
+	var merged: Dictionary = vault.call(
 		"merge_secrets",
 		"app",
 		sanitized,
 		SecretVaultScript.APP_SECRET_KEYS
 	)
+	var local_database_sync := _local_database_sync()
+	if local_database_sync != null and local_database_sync.has_method("get_remote_credentials"):
+		var remote: Variant = local_database_sync.call("get_remote_credentials")
+		if typeof(remote) == TYPE_DICTIONARY:
+			merged.merge(remote as Dictionary, true)
+	return merged
 
 
 func _read_json_dictionary_raw(path: String) -> Dictionary:
@@ -3331,7 +3336,47 @@ func _write_json_dictionary(path: String, value: Dictionary) -> bool:
 				stored_value,
 				SecretVaultScript.APP_SECRET_KEYS
 			)
-	return _write_json_dictionary_raw(path, stored_value)
+	var saved := _write_json_dictionary_raw(path, stored_value)
+	if saved and path == SETTINGS_PATH:
+		_queue_remote_credentials_sync(value)
+	return saved
+
+
+func _queue_remote_credentials_sync(settings: Dictionary) -> void:
+	if selected_branch_id.strip_edges() == "":
+		return
+	var local_database_sync := _local_database_sync()
+	if local_database_sync == null or not local_database_sync.has_method("save_remote_credentials"):
+		return
+	var payload := _remote_credentials_payload(settings)
+	if payload.is_empty():
+		return
+	local_database_sync.call_deferred("save_remote_credentials", payload)
+
+
+func _remote_credentials_payload(settings: Dictionary) -> Dictionary:
+	var payload: Dictionary = {}
+	var clean_branch := selected_branch_id.strip_edges().to_lower()
+	var keys: Array[String] = []
+	if clean_branch == "imperatriz":
+		keys = [
+			"grupo_rs_modern_user", "grupo_rs_modern_password",
+			"grupo_rs_api_user", "grupo_rs_api_password",
+			"arya_email", "arya_password", "arya_token",
+			"linksolutions_email", "linksolutions_password", "linksolutions_token",
+			"experttexting_username", "experttexting_api_key", "experttexting_api_secret",
+			"openai_api_key",
+		]
+	else:
+		keys = [
+			_legacy_branch_setting_key(clean_branch, "user"),
+			_legacy_branch_setting_key(clean_branch, "password"),
+		]
+	for key in keys:
+		var value := str(settings.get(key, "")).strip_edges()
+		if value != "":
+			payload[key] = value
+	return payload
 
 
 func _write_json_dictionary_raw(path: String, value: Dictionary) -> bool:
@@ -3403,6 +3448,8 @@ func _register_integrations_credentials_log() -> void:
 		configured.append("Arya")
 	if str(settings.get("linksolutions_email", "")).strip_edges() != "" and str(settings.get("linksolutions_password", "")) != "":
 		configured.append("Link Solutions")
+	if not SGA_ENABLED:
+		return
 	for source in [SGA_SOURCE_RASTREIO, SGA_SOURCE_PROTECAO]:
 		if str(settings.get(_sga_setting_key(source, "api_token"), "")).strip_edges() != "" \
 			and str(settings.get(_sga_setting_key(source, "user"), "")).strip_edges() != "" \
@@ -3427,22 +3474,25 @@ func _register_integrations_credentials_log() -> void:
 
 func _open_selected_branch() -> void:
 	_clear_screen()
-	var preview_status: Dictionary = branch_preview_sync_states.get(selected_branch_id, {})
-	var reuse_preview := selected_branch_preview_store != null and selected_branch_preview_branch_id == selected_branch_id
-	if reuse_preview:
+	# Reaproveite somente a prévia da mesma filial. O vínculo exato impede mistura
+	# entre bases e evita carregar/deserializar os mesmos milhares de registros
+	# uma segunda vez logo após o login.
+	if selected_branch_preview_store != null and selected_branch_preview_branch_id == selected_branch_id:
 		store = selected_branch_preview_store
 	else:
 		store = StoreScript.new()
 		store.configure(selected_branch_db_path, selected_branch_backup_name, selected_branch_backup_dir, selected_branch_id == "imperatriz")
 		store.load_db()
-	var firebase_sync := _firebase_sync()
-	if firebase_sync != null:
-		var status_callable := Callable(self, "_on_firebase_status_changed")
-		if not firebase_sync.is_connected("status_changed", status_callable):
-			firebase_sync.connect("status_changed", status_callable)
+	selected_branch_preview_store = null
+	selected_branch_preview_branch_id = ""
+	var local_database_sync := _local_database_sync()
+	if local_database_sync != null:
+		var status_callable := Callable(self, "_on_local_database_status_changed")
+		if not local_database_sync.is_connected("status_changed", status_callable):
+			local_database_sync.connect("status_changed", status_callable)
 		# A filial aberta deve ser sempre o vinculo ativo do singleton. Uma previa
 		# anterior pode ter terminado (ou ter sido substituida) antes da entrada.
-		firebase_sync.call("bind_store", store, selected_branch_id)
+		local_database_sync.call("bind_store", store, selected_branch_id)
 	_register_integrations_credentials_log()
 	_build_ui()
 	_prepare_startup_animation()
@@ -3456,20 +3506,20 @@ func _open_selected_branch() -> void:
 	_refresh_cloud_status()
 	_show_dashboard()
 	_play_startup_animation()
-	if firebase_sync != null:
-		call_deferred("_refresh_open_branch_from_remote", firebase_sync, selected_branch_id, store)
+	if local_database_sync != null:
+		call_deferred("_refresh_open_branch_from_remote", local_database_sync, selected_branch_id, store)
 
 
-func _refresh_open_branch_from_remote(firebase_sync: Node, branch_id: String, bound_store: Variant) -> void:
+func _refresh_open_branch_from_remote(local_database_sync: Node, branch_id: String, bound_store: Variant) -> void:
 	## Confirma o snapshot da filial aberta e recompõe a tela somente se o vínculo
 	## ainda for o mesmo. A leitura nunca mistura a resposta de uma troca anterior.
-	if firebase_sync == null or not is_instance_valid(firebase_sync):
+	if local_database_sync == null or not is_instance_valid(local_database_sync):
 		return
-	var result: Variant = await firebase_sync.call("refresh_remote")
+	var result: Variant = await local_database_sync.call("refresh_remote")
 	if branch_id != selected_branch_id or bound_store != store:
 		return
 	if typeof(result) == TYPE_DICTIONARY:
-		_on_firebase_status_changed(result as Dictionary)
+		_on_local_database_status_changed(result as Dictionary)
 	if not bool((result as Dictionary).get("data_available", false)) if typeof(result) == TYPE_DICTIONARY else true:
 		return
 	match current_section:
@@ -3566,16 +3616,15 @@ func _build_sidebar() -> Control:
 
 	list.add_child(_make_sidebar_button("Inicio", "dashboard", "dashboard", _show_dashboard))
 	if _branch_supports_monitor_4g():
-		list.add_child(_make_sidebar_button("Mapa Grande", "localizacao", "monitor_4g", _show_smart_4g_monitor))
+		# O item Mapa Grande abre a tela combinada de localização dos veículos.
+		# O estado visual continua usando a chave monitor_4g para preservar o menu.
+		list.add_child(_make_sidebar_button("Mapa Grande", "localizacao", "monitor_4g", _show_vehicle_location_monitor))
 	list.add_child(_make_sidebar_equipment_group())
 	var section_divider := HSeparator.new()
 	section_divider.add_theme_constant_override("separation", 8)
 	section_divider.add_theme_color_override("separator_color", Color("#315775"))
 	list.add_child(section_divider)
-	if _branch_supports_sms():
-		list.add_child(_make_sidebar_button("Painel SMS", "timeline", "sms_panel", _show_sms_panel))
 	list.add_child(_make_sidebar_button("Configurações", "configuracoes", "settings", _show_arya_config))
-	list.add_child(_make_sidebar_button("Logs do sistema", "log", "logs", _show_system_log))
 
 	var spacer := Control.new()
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -4037,28 +4086,8 @@ func _make_system_menu_button() -> Control:
 	popup_margin.add_child(popup_list)
 
 	popup_list.add_child(_make_system_menu_row("cadastros", "Cadastros", 0, popup))
-	popup_list.add_child(_make_system_menu_row("timeline", "Linha do tempo", 4, popup))
-
-	if selected_branch_id == "imperatriz":
-		popup_list.add_child(
-			_make_system_menu_row("manutencoes", "Manutenções", 1, popup)
-		)
-
-	popup_list.add_child(
-		_make_system_menu_row("relatorios", "Relatórios", 2, popup)
-	)
-
-	popup_list.add_child(
-		_make_system_menu_row("log", "Log de sistema", 3, popup)
-	)
-	popup_list.add_child(
-		_make_system_menu_row("dashboard", "Saude do sistema", 5, popup)
-	)
 	popup_list.add_child(
 		_make_system_menu_row("configuracoes", "Configuracoes", 6, popup)
-	)
-	popup_list.add_child(
-		_make_system_menu_row("assistente", "Assistente autonomo", 7, popup)
 	)
 
 	menu_button.toggled.connect(func(pressed: bool):
@@ -4490,11 +4519,11 @@ func _run_remote_operation_job(job: Dictionary) -> void:
 			result = {"ok": false, "message": str(finalized_modification.get("message", "Falha ao atualizar o cadastro local."))}
 		else:
 			result["local"] = finalized_modification
-			var firebase_result := await _ensure_firebase_modification_saved(serial, finalized_modification.get("product", {}) as Dictionary)
-			if not bool(firebase_result.get("ok", false)):
-				result = {"ok": false, "message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao da modificacao.")), "firebase_pending": true}
+			var local_database_result := await _ensure_local_database_modification_saved(serial, finalized_modification.get("product", {}) as Dictionary)
+			if not bool(local_database_result.get("ok", false)):
+				result = {"ok": false, "message": str(local_database_result.get("message", "O Banco local SQL nao confirmou a gravacao da modificacao.")), "local_database_pending": true}
 			else:
-				result["firebase"] = firebase_result
+				result["local_database"] = local_database_result
 	if bool(result.get("confirmation_pending", false)) and not bool(result.get("ok", false)):
 		var pending_failure_message := str(result.get("message", "A API aceitou a operacao, mas a confirmacao ainda esta pendente."))
 		_remote_queue_finish(queue_id, false, pending_failure_message, "API", "pending")
@@ -4805,7 +4834,7 @@ func _poll_st310_location_packet() -> void:
 		return
 	st310_location_polling = true
 	# A localizacao e servida pela API de rastreamento e nao depende do
-	# Firebase. A releitura da base operacional acontece em seu proprio ciclo
+	# Banco local SQL. A releitura da base operacional acontece em seu proprio ciclo
 	# de sincronizacao, sem bloquear o mapa quando o estoque estiver offline.
 	if current_section == "vehicle_location" and vehicle_location_plate_input != null and is_instance_valid(vehicle_location_plate_input):
 		await _refresh_vehicle_location_view(vehicle_location_query_generation)
@@ -4869,7 +4898,7 @@ func _run_integration_maintenance() -> void:
 
 
 func _pause_online_services() -> void:
-	# Somente rotinas que leem/escrevem o estado operacional do Firebase sao
+	# Somente rotinas que leem/escrevem o estado operacional do Banco local SQL sao
 	# pausadas. Integracoes externas continuam disponiveis em modo parcial.
 	auto_reset_stop_requested = true
 	for timer in [
@@ -5447,7 +5476,7 @@ func _refresh_dashboard_communication() -> void:
 
 
 func _refresh_dashboard_data() -> void:
-	## O botao principal precisa testar o Firebase antes de atualizar os paineis.
+	## O botao principal precisa testar o Banco local SQL antes de atualizar os paineis.
 	## Sem esta chamada, a tela podia continuar mostrando o ultimo estado verde
 	## quando a internet caia e nao havia nenhuma alteracao pendente.
 	await _refresh_cloud_status()
@@ -5672,17 +5701,17 @@ func _guardian_collect_health() -> Dictionary:
 func _guardian_local_data_component() -> Dictionary:
 	if store == null:
 		return {
-			"id": "firebase_data",
-			"label": "Firebase",
+			"id": "local_database_data",
+			"label": "Banco local SQL",
 			"status": "error",
 			"message": "A base online nao foi inicializada.",
 		}
-	var firebase_sync := _firebase_sync()
-	var firebase_status: Dictionary = firebase_sync.call("get_status") if firebase_sync != null else {}
-	if not bool(firebase_status.get("data_available", false)):
+	var local_database_sync := _local_database_sync()
+	var local_database_status: Dictionary = local_database_sync.call("get_status") if local_database_sync != null else {}
+	if not bool(local_database_status.get("data_available", false)):
 		return {
-			"id": "firebase_data",
-			"label": "Firebase",
+			"id": "local_database_data",
+			"label": "Banco local SQL",
 			"status": "error",
 			"message": "Dados bloqueados: servidor online indisponivel.",
 		}
@@ -5691,14 +5720,14 @@ func _guardian_local_data_component() -> Dictionary:
 	var products := int(health.get("products", 0))
 	if not diagnostics.is_empty():
 		return {
-			"id": "firebase_data",
-			"label": "Firebase",
+			"id": "local_database_data",
+			"label": "Banco local SQL",
 			"status": "warning",
 			"message": "%d cadastro(s), %d pendencia(s) para revisao humana." % [products, diagnostics.size()],
 		}
 	return {
-		"id": "firebase_data",
-		"label": "Firebase",
+		"id": "local_database_data",
+		"label": "Banco local SQL",
 		"status": "ok",
 		"message": "%d cadastro(s) carregado(s) da base online." % products,
 	}
@@ -6042,15 +6071,15 @@ func _setup_experttexting_poll() -> void:
 
 func _experttexting_credentials() -> Dictionary:
 	var settings := _read_json_dictionary(SETTINGS_PATH)
-	var username := OS.get_environment("EXPERTTEXTING_USERNAME").strip_edges()
-	var api_key := OS.get_environment("EXPERTTEXTING_API_KEY").strip_edges()
-	var api_secret := OS.get_environment("EXPERTTEXTING_API_SECRET").strip_edges()
+	var username := str(settings.get("experttexting_username", "")).strip_edges()
+	var api_key := str(settings.get("experttexting_api_key", "")).strip_edges()
+	var api_secret := str(settings.get("experttexting_api_secret", "")).strip_edges()
 	if username == "":
-		username = str(settings.get("experttexting_username", "")).strip_edges()
+		username = OS.get_environment("EXPERTTEXTING_USERNAME").strip_edges()
 	if api_key == "":
-		api_key = str(settings.get("experttexting_api_key", "")).strip_edges()
+		api_key = OS.get_environment("EXPERTTEXTING_API_KEY").strip_edges()
 	if api_secret == "":
-		api_secret = str(settings.get("experttexting_api_secret", "")).strip_edges()
+		api_secret = OS.get_environment("EXPERTTEXTING_API_SECRET").strip_edges()
 	return {
 		"username": username,
 		"api_key": api_key,
@@ -6516,7 +6545,7 @@ func _load_sms_panel_history() -> void:
 					known_ids[event_id] = true
 					restored.append(event)
 
-	# Os logs chegam do Firebase depois da sincronizacao e sobrevivem ao
+	# Os logs chegam do Banco local SQL depois da sincronizacao e sobrevivem ao
 	# encerramento do programa. Eventos estruturados novos sao preferidos;
 	# registros antigos sem esse bloco continuam preservados no log, mas nao
 	# podem ser reconstruidos com seguranca.
@@ -6917,44 +6946,11 @@ func _sync_product_plate_from_grupo_rs(product: Dictionary) -> Dictionary:
 		remote_plate,
 		_blank(local_plate),
 	]
-
-	if _is_internal_stock_plate(remote_plate):
-		if local_status == "instalado" or _search_key(local_plate) != _search_key(remote_plate):
-			var updated_product := product.duplicate(true)
-			updated_product["plate"] = remote_plate
-			if local_status == "instalado":
-				updated_product["tracker_status"] = "Estoque"
-				updated_product["status"] = "Estoque"
-				updated_product["location"] = "Estoque"
-				updated_product["stock"] = 1
-				updated_product["installed_at"] = ""
-				updated_product["discharged_at"] = ""
-			var saved := store.upsert_product(updated_product)
-			if saved.is_empty():
-				return {"action": "error", "error_kind": "local", "message": "falha ao atualizar estoque"}
-			_log_system_action("Sincronizou estoque Grupo RS", details, sku)
-			return {"action": "updated"}
-		return {"action": "stock"}
-
-	if not _looks_like_vehicle_plate(remote_plate):
-		return {"action": "error", "error_kind": "data", "message": "placa online invalida"}
-
-	if local_status != "instalado":
-		if not store.install_tracker(sku, remote_plate):
-			return {"action": "error", "error_kind": "local", "message": "falha ao dar baixa"}
-		_log_system_action("Baixa automatica Grupo RS", details, sku)
-		return {"action": "installed"}
-
+	# A API e somente fonte de consulta. Divergencias sao observadas, mas nunca
+	# podem sobrescrever cadastro, placa ou status confirmados no SQLite local.
 	if _search_key(local_plate) != _search_key(remote_plate):
-		var updated_installed := product.duplicate(true)
-		updated_installed["plate"] = remote_plate
-		var saved_installed := store.upsert_product(updated_installed)
-		if saved_installed.is_empty():
-			return {"action": "error", "error_kind": "local", "message": "falha ao atualizar placa"}
-		_log_system_action("Atualizou placa Grupo RS", details, sku)
-		return {"action": "updated"}
-
-	return {"action": "stock"}
+		return {"action": "stock", "observed_difference": true, "details": details, "local_status": local_status}
+	return {"action": "stock", "observed_difference": false, "details": details, "local_status": local_status}
 
 
 func _is_internal_stock_plate(plate: String) -> bool:
@@ -8531,7 +8527,7 @@ func _make_auto_reset_status_widget() -> Control:
 func _make_cloud_status_button() -> Button:
 	var button := Button.new()
 	button.text = ""
-	button.tooltip_text = "Abrir o painel de saude do Firebase"
+	button.tooltip_text = "Abrir o painel de saude do banco local"
 	button.custom_minimum_size = Vector2(270, 60)
 	button.pressed.connect(_show_cloud_status_details)
 	button.add_theme_stylebox_override("normal", AppDesignSystem.surface(Color("#FFFFFF"), Color("#D3E0EC"), 1, 9))
@@ -8554,7 +8550,7 @@ func _make_cloud_status_button() -> Button:
 	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	margin.add_child(row)
 
-	cloud_status_pulse = FirebaseTopbarPulse.new()
+	cloud_status_pulse = BancoLocalSQLTopbarPulse.new()
 	row.add_child(cloud_status_pulse)
 
 	var stack := VBoxContainer.new()
@@ -8565,7 +8561,7 @@ func _make_cloud_status_button() -> Button:
 	row.add_child(stack)
 
 	var eyebrow := Label.new()
-	eyebrow.text = "FIREBASE / REALTIME DATABASE"
+	eyebrow.text = "BANCO LOCAL / SQLITE"
 	eyebrow.clip_text = true
 	eyebrow.add_theme_font_override("font", UI_FONT)
 	eyebrow.add_theme_font_size_override("font_size", 10)
@@ -8607,39 +8603,39 @@ func _make_cloud_status_button() -> Button:
 func _refresh_cloud_status() -> void:
 	if store == null:
 		return
-	var firebase_sync := _firebase_sync()
-	if firebase_sync == null:
-		_on_firebase_status_changed({
+	var local_database_sync := _local_database_sync()
+	if local_database_sync == null:
+		_on_local_database_status_changed({
 			"state": "not_configured",
 			"message": "Sincronizador remoto indisponivel.",
 		})
 		return
-	_on_firebase_status_changed(firebase_sync.call("get_status"))
+	_on_local_database_status_changed(local_database_sync.call("get_status"))
 	if cloud_status_probe_running:
 		return
 	cloud_status_probe_running = true
-	var probed: Variant = await firebase_sync.call("refresh_remote", true)
+	var probed: Variant = await local_database_sync.call("refresh_remote", true)
 	cloud_status_probe_running = false
 	if typeof(probed) == TYPE_DICTIONARY:
-		_on_firebase_status_changed(probed as Dictionary)
+		_on_local_database_status_changed(probed as Dictionary)
 
 
 func _show_cloud_status_details() -> void:
 	if store == null:
 		return
-	var firebase_sync := _firebase_sync()
-	var status: Dictionary = firebase_sync.call("get_status") if firebase_sync != null else {}
+	var local_database_sync := _local_database_sync()
+	var status: Dictionary = local_database_sync.call("get_status") if local_database_sync != null else {}
 	var state := str(status.get("state", "not_configured"))
-	var state_text := _firebase_state_text(state)
+	var state_text := _local_database_state_text(state)
 	var message := str(status.get("message", "Sem detalhes."))
 	var latency := int(status.get("latency_ms", -1))
 	var last_sync := str(status.get("last_sync_at", "")).strip_edges()
 	var available_text := "Sim" if bool(status.get("data_available", false)) else "Nao"
 	_show_info(
-		"Firebase: %s\n%s\n%s\nLatencia: %s\nUltimo acesso: %s\nDados liberados: %s\n\nO Firebase e a unica fonte dos cadastros. Sem internet, nenhuma informacao operacional e exibida ou alterada." % [
+		"SQLite local: %s\n%s\n%s\nLatencia: %s\nUltimo acesso: %s\nDados liberados: %s\n\nOs cadastros ficam no banco local e funcionam sem internet." % [
 			state_text,
 			message,
-			_firebase_verification_text(status),
+			_local_database_verification_text(status),
 			("%d ms" % latency) if latency >= 0 else "Ainda nao medida",
 			last_sync if last_sync != "" else "Ainda nao realizada",
 			available_text,
@@ -8648,8 +8644,8 @@ func _show_cloud_status_details() -> void:
 	_refresh_cloud_status()
 
 
-func _firebase_sync() -> Node:
-	var existing := get_node_or_null("/root/FirebaseSync")
+func _local_database_sync() -> Node:
+	var existing := get_node_or_null("/root/LocalDataService")
 	if existing != null \
 			and existing.has_method("uses_encrypted_secret_vault") \
 			and bool(existing.call("uses_encrypted_secret_vault")):
@@ -8661,8 +8657,8 @@ func _firebase_sync() -> Node:
 	if existing != null:
 		tree.root.remove_child(existing)
 		existing.queue_free()
-	var sync := FirebaseSyncScript.new()
-	sync.name = "FirebaseSync"
+	var sync := LocalDataServiceScript.new()
+	sync.name = "LocalDataService"
 	tree.root.add_child(sync)
 	return sync
 
@@ -8702,9 +8698,9 @@ func _app_module(module_id: String) -> RefCounted:
 	return registry.call("get_module", module_id)
 
 
-func _on_firebase_status_changed(status: Dictionary) -> void:
+func _on_local_database_status_changed(status: Dictionary) -> void:
 	var state := str(status.get("state", "not_configured"))
-	_record_dashboard_firebase_status(status)
+	_record_dashboard_local_database_status(status)
 	var was_available := online_data_available
 	online_data_available = bool(status.get("data_available", false))
 	# O primeiro snapshot remoto da base pode chegar depois da montagem da tela.
@@ -8714,26 +8710,26 @@ func _on_firebase_status_changed(status: Dictionary) -> void:
 		_load_sms_panel_history()
 		if current_section == "sms_panel":
 			call_deferred("_show_sms_panel")
-	var firebase_required := _section_requires_firebase(current_section)
+	var local_database_required := _section_requires_local_database(current_section)
 	var manager := _integration_manager()
 	if manager != null:
-		manager.call("update_status", "firebase", status)
-	var color := _firebase_state_color(state)
+		manager.call("update_status", "local_database", status)
+	var color := _local_database_state_color(state)
 	var pending_count := int(status.get("pending_count", 0))
 	if cloud_status_dot != null and is_instance_valid(cloud_status_dot):
 		cloud_status_dot.set_dot_color(color)
 	if cloud_status_pulse != null and is_instance_valid(cloud_status_pulse):
 		cloud_status_pulse.set_status(state)
 	if cloud_status_label != null and is_instance_valid(cloud_status_label):
-		cloud_status_label.text = _firebase_topbar_text(state, pending_count)
+		cloud_status_label.text = _local_database_topbar_text(state, pending_count)
 		cloud_status_label.add_theme_color_override("font_color", color)
 	if cloud_status_detail_label != null and is_instance_valid(cloud_status_detail_label):
-		cloud_status_detail_label.text = _firebase_verification_text(status)
+		cloud_status_detail_label.text = _local_database_verification_text(status)
 		cloud_status_detail_label.add_theme_color_override("font_color", color if bool(status.get("read_ok", false)) and bool(status.get("write_ok", false)) else MUTED)
 	if cloud_status_metrics_label != null and is_instance_valid(cloud_status_metrics_label):
-		cloud_status_metrics_label.text = _firebase_topbar_metrics_text(status)
+		cloud_status_metrics_label.text = _local_database_topbar_metrics_text(status)
 	if sidebar_branch_status_label != null and is_instance_valid(sidebar_branch_status_label):
-		sidebar_branch_status_label.text = "Online" if online_data_available else _firebase_topbar_text(state)
+		sidebar_branch_status_label.text = "Online" if online_data_available else _local_database_topbar_text(state)
 		sidebar_branch_status_label.add_theme_color_override("font_color", color)
 
 	if server_health_core != null and is_instance_valid(server_health_core):
@@ -8743,15 +8739,15 @@ func _on_firebase_status_changed(status: Dictionary) -> void:
 			bool(status.get("pending", false))
 		)
 	if server_health_state_label != null and is_instance_valid(server_health_state_label):
-		server_health_state_label.text = _firebase_state_text(state)
+		server_health_state_label.text = _local_database_state_text(state)
 		server_health_state_label.add_theme_color_override("font_color", color)
 	if server_health_connection_label != null and is_instance_valid(server_health_connection_label):
-		server_health_connection_label.text = "Servidor conectado" if online_data_available else _firebase_state_text(state)
+		server_health_connection_label.text = "Servidor conectado" if online_data_available else _local_database_state_text(state)
 		server_health_connection_label.add_theme_color_override("font_color", GREEN if online_data_available else color)
 	if server_health_detail_label != null and is_instance_valid(server_health_detail_label):
-		server_health_detail_label.text = "%s\nFirebase / Realtime Database\n%s" % [
+		server_health_detail_label.text = "%s\nBanco local / SQLite\n%s" % [
 			"Servidor conectado" if online_data_available else "Servidor não conectado",
-			_firebase_verification_text(status),
+			_local_database_verification_text(status),
 		]
 	if server_health_latency_label != null and is_instance_valid(server_health_latency_label):
 		var latency := int(status.get("latency_ms", -1))
@@ -8759,32 +8755,32 @@ func _on_firebase_status_changed(status: Dictionary) -> void:
 	if server_health_sync_label != null and is_instance_valid(server_health_sync_label):
 		var last_sync := str(status.get("last_sync_at", "")).strip_edges()
 		server_health_sync_label.text = "Ultimo acesso\n%s" % (last_sync if last_sync != "" else "Aguardando")
-	if firebase_config_status_label != null and is_instance_valid(firebase_config_status_label):
-		firebase_config_status_label.text = "%s: %s" % [_firebase_state_text(state), str(status.get("message", ""))]
-		firebase_config_status_label.add_theme_color_override("font_color", color)
+	if local_database_config_status_label != null and is_instance_valid(local_database_config_status_label):
+		local_database_config_status_label.text = "%s: %s" % [_local_database_state_text(state), str(status.get("message", ""))]
+		local_database_config_status_label.add_theme_color_override("font_color", color)
 
 	# Durante a pré-sincronização a tela ainda não entrou na base e `store`
 	# pertence ao cache de seleção. Os serviços operacionais só podem iniciar
 	# depois que o operador autenticar e o dashboard principal for montado.
-	# O Firebase controla os dados operacionais, mas nao deve interromper
+	# O Banco local SQL controla os dados operacionais, mas nao deve interromper
 	# localizacao, mapa, configuracoes ou outras integracoes independentes.
 	if store != null:
 		_start_online_services()
 	if online_data_available:
 		if online_unavailable_visible:
 			online_unavailable_visible = false
-			if firebase_required:
+			if local_database_required:
 				call_deferred("_restore_current_content_after_connection")
-	elif firebase_required and (was_available or (content_area != null and not current_content_allows_offline)):
+	elif local_database_required and (was_available or (content_area != null and not current_content_allows_offline)):
 		_pause_online_services()
 		call_deferred("_show_online_unavailable_view", state, str(status.get("message", "")))
 	else:
 		# Mantem a tela atual aberta em modo parcial, pausando somente os
-		# gravadores operacionais que dependem do Firebase.
+		# gravadores operacionais que dependem do Banco local SQL.
 		_pause_online_services()
 
 
-func _record_dashboard_firebase_status(status: Dictionary) -> void:
+func _record_dashboard_local_database_status(status: Dictionary) -> void:
 	var state := str(status.get("state", "not_configured"))
 	var latency := int(status.get("latency_ms", -1))
 	var read_ok := bool(status.get("read_ok", false))
@@ -8798,35 +8794,35 @@ func _record_dashboard_firebase_status(status: Dictionary) -> void:
 		"result": result_text,
 		"latency": latency,
 	}
-	if dashboard_firebase_history.is_empty() \
-			or str(dashboard_firebase_history[0].get("state", "")) != state \
-			or int(dashboard_firebase_history[0].get("latency", -1)) != latency:
-		dashboard_firebase_history.push_front(entry)
-		while dashboard_firebase_history.size() > 3:
-			dashboard_firebase_history.pop_back()
-	_render_dashboard_firebase_history()
+	if dashboard_local_database_history.is_empty() \
+			or str(dashboard_local_database_history[0].get("state", "")) != state \
+			or int(dashboard_local_database_history[0].get("latency", -1)) != latency:
+		dashboard_local_database_history.push_front(entry)
+		while dashboard_local_database_history.size() > 3:
+			dashboard_local_database_history.pop_back()
+	_render_dashboard_local_database_history()
 
 
-func _render_dashboard_firebase_history() -> void:
+func _render_dashboard_local_database_history() -> void:
 	if server_health_history_body == null or not is_instance_valid(server_health_history_body):
 		return
 	for child in server_health_history_body.get_children():
 		server_health_history_body.remove_child(child)
 		child.queue_free()
-	if dashboard_firebase_history.is_empty():
+	if dashboard_local_database_history.is_empty():
 		var waiting := Label.new()
 		waiting.text = "Aguardando primeira verificacao"
 		waiting.add_theme_font_size_override("font_size", 11)
 		waiting.add_theme_color_override("font_color", MUTED)
 		server_health_history_body.add_child(waiting)
 		return
-	for entry in dashboard_firebase_history:
+	for entry in dashboard_local_database_history:
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override("separation", 6)
 		var dot := Label.new()
 		dot.text = "●"
 		dot.add_theme_font_size_override("font_size", 10)
-		dot.add_theme_color_override("font_color", _firebase_state_color(str(entry.get("state", ""))))
+		dot.add_theme_color_override("font_color", _local_database_state_color(str(entry.get("state", ""))))
 		row.add_child(dot)
 		var result := Label.new()
 		result.text = str(entry.get("result", "Verificacao"))
@@ -8842,7 +8838,7 @@ func _render_dashboard_firebase_history() -> void:
 		server_health_history_body.add_child(row)
 
 
-func _firebase_state_text(state: String) -> String:
+func _local_database_state_text(state: String) -> String:
 	match state:
 		"synced", "online":
 			return "Servidor saudável"
@@ -8854,6 +8850,8 @@ func _firebase_state_text(state: String) -> String:
 			return "Conectando"
 		"pending", "idle":
 			return "Aguardando servidor"
+		"auth_required":
+			return "Login requerido"
 		"offline":
 			return "Servidor offline"
 		"conflict":
@@ -8866,16 +8864,16 @@ func _firebase_state_text(state: String) -> String:
 			return "Servidor nao configurado"
 
 
-func _section_requires_firebase(section: String = "") -> bool:
+func _section_requires_local_database(section: String = "") -> bool:
 	var active_section := section.strip_edges().to_lower()
 	if active_section == "":
 		active_section = current_section.strip_edges().to_lower()
 	# Estoque, cadastro em massa, manutencoes, logs e o dashboard exibem ou
-	# alteram dados operacionais cuja unica fonte autorizada e o Firebase.
+	# alteram dados operacionais cuja unica fonte autorizada e o Banco local SQL.
 	return active_section in ["dashboard", "inventory", "bulk", "maintenance", "logs"]
 
 
-func _firebase_topbar_text(state: String, pending_count: int = 0) -> String:
+func _local_database_topbar_text(state: String, pending_count: int = 0) -> String:
 	var pending_suffix := " · %d pend." % pending_count if pending_count > 0 else ""
 	match state:
 		"synced", "online":
@@ -8886,6 +8884,8 @@ func _firebase_topbar_text(state: String, pending_count: int = 0) -> String:
 			return "Sincronizando%s" % pending_suffix
 		"pending", "idle":
 			return "Aguardando%s" % pending_suffix
+		"auth_required":
+			return "Login requerido%s" % pending_suffix
 		"offline":
 			return "Sem internet%s" % pending_suffix
 		"conflict", "auth_error", "error":
@@ -8894,7 +8894,7 @@ func _firebase_topbar_text(state: String, pending_count: int = 0) -> String:
 			return "Sem dados"
 
 
-func _firebase_state_color(state: String) -> Color:
+func _local_database_state_color(state: String) -> Color:
 	match state:
 		"synced", "online":
 			return GREEN
@@ -8902,6 +8902,8 @@ func _firebase_state_color(state: String) -> Color:
 			return YELLOW
 		"syncing", "connecting", "pending", "idle":
 			return BLUE
+		"auth_required":
+			return ORANGE
 		"offline":
 			return RED
 		"conflict", "auth_error", "error":
@@ -8910,7 +8912,7 @@ func _firebase_state_color(state: String) -> Color:
 			return Color("#7d8996")
 
 
-func _firebase_verification_text(status: Dictionary) -> String:
+func _local_database_verification_text(status: Dictionary) -> String:
 	var read_ok := bool(status.get("read_ok", false))
 	var write_ok := bool(status.get("write_ok", false))
 	return "Consulta OK  |  Alteração OK" if read_ok and write_ok else \
@@ -8920,7 +8922,7 @@ func _firebase_verification_text(status: Dictionary) -> String:
 	]
 
 
-func _firebase_topbar_metrics_text(status: Dictionary) -> String:
+func _local_database_topbar_metrics_text(status: Dictionary) -> String:
 	var pending_count := int(status.get("pending_count", 0))
 	var latency := int(status.get("latency_ms", -1))
 	var latency_text := "%d ms" % latency if latency >= 0 else "--"
@@ -8928,11 +8930,11 @@ func _firebase_topbar_metrics_text(status: Dictionary) -> String:
 
 
 func _request_manual_backup() -> void:
-	_show_info("Os dados operacionais existem somente no Firebase. Backups locais e Google Drive estao desativados.")
+	_show_info("Os dados operacionais ficam no SQLite local. Os backups validados sao mantidos localmente e copiados para a pasta sincronizada do Google Drive.")
 
 
 func _request_restore_backup() -> void:
-	_show_info("A restauracao local foi desativada. O Firebase e a unica fonte de dados.")
+	_show_info("A restauracao exige a escolha de um backup validado e confirmacao explicita.")
 
 
 func _on_restore_backup_selected(path: String) -> void:
@@ -9665,7 +9667,7 @@ func _fetch_vehicle_location_decoder_rows(query: String = "") -> Dictionary:
 			"decoder_message": str(decoded.get("message", "ST310 sem leitura")),
 			"coordinates_valid": bool(decoded.get("coordinates_valid", false)),
 			"source": "Decodificador ST310",
-			"association_source": "Cadastro local/Firebase",
+			"association_source": "Cadastro local/Banco local SQL",
 		}
 		rows.append(row)
 	return {"ok": true, "rows": rows, "direct": true, "source": "Decodificador ST310"}
@@ -11141,10 +11143,15 @@ func _show_arya_config() -> void:
 func _set_content(control: Control, allow_offline: bool = false) -> void:
 	if not is_instance_valid(content_area):
 		return
+	if current_section not in ACTIVE_SCOPE_SECTIONS:
+		if control != null:
+			control.queue_free()
+		_show_dashboard()
+		return
 	var navigation_id := _begin_content_navigation()
-	var firebase_required := _section_requires_firebase(current_section)
-	current_content_allows_offline = allow_offline or not firebase_required
-	if store != null and not online_data_available and firebase_required and not allow_offline:
+	var local_database_required := _section_requires_local_database(current_section)
+	current_content_allows_offline = allow_offline or not local_database_required
+	if store != null and not online_data_available and local_database_required and not allow_offline:
 		control.queue_free()
 		control = _build_online_unavailable_view()
 		online_unavailable_visible = true
@@ -11227,7 +11234,7 @@ func _build_online_unavailable_view(state: String = "offline", detail: String = 
 	stack.add_child(title)
 
 	var message := Label.new()
-	message.text = detail if detail.strip_edges() != "" else "Nao foi possivel acessar o Firebase."
+	message.text = detail if detail.strip_edges() != "" else "Nao foi possivel acessar o Banco local SQL."
 	message.text += "\nOs cadastros ficam ocultos e nenhuma alteracao e salva ate a conexao voltar."
 	message.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	message.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -11242,18 +11249,18 @@ func _build_online_unavailable_view(state: String = "offline", detail: String = 
 	actions.add_theme_constant_override("separation", 10)
 	stack.add_child(actions)
 	actions.add_child(_make_action_button("Tentar novamente", BLUE, BLUE, Color.WHITE, Vector2(190, 46), _retry_online_connection))
-	actions.add_child(_make_action_button("Configurar servidor", Color("#6c7f91"), Color("#6c7f91"), Color.WHITE, Vector2(200, 46), _show_firebase_config))
+	actions.add_child(_make_action_button("Configurar servidor", Color("#6c7f91"), Color("#6c7f91"), Color.WHITE, Vector2(200, 46), _show_local_database_config))
 	return center
 
 
 func _retry_online_connection() -> void:
-	var firebase_sync := _firebase_sync()
-	if firebase_sync != null:
-		firebase_sync.call("force_sync")
+	var local_database_sync := _local_database_sync()
+	if local_database_sync != null:
+		local_database_sync.call("force_sync")
 
 
-func _show_firebase_config() -> void:
-	config_selected_section = "firebase"
+func _show_local_database_config() -> void:
+	config_selected_section = "local_database"
 	_show_arya_config()
 
 
@@ -14984,10 +14991,13 @@ func _build_dashboard_view() -> Control:
 	featured.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	metrics.add_child(featured)
 	metrics.add_child(_make_stat_card("Em estoque", str(stats.get("available", 0)), "Disponíveis para uso", GREEN, trends.get("Em estoque", {}), Callable(self, "_show_list_with_status").bind("estoque")))
-	metrics.add_child(_make_stat_card("Em reserva", str(stats.get("reserved", 0)), "Aparelhos em reserva", YELLOW, trends.get("Em reserva", trends.get("Reserva", {})), Callable(self, "_show_list_with_status").bind("reserva")))
 	metrics.add_child(_make_stat_card("Instalados", str(stats.get("installed", 0)), "Aparelhos instalados", BLUE, trends.get("Instalados", {}), Callable(self, "_show_list_with_status").bind("instalado")))
-	metrics.add_child(_make_stat_card("Em manutenção", str(stats.get("maintenance", 0)), "Encaminhados para revisão", ORANGE, trends.get("Em manutenção", trends.get("Manutencoes", {})), Callable(self, "_show_list_with_status").bind("manutencao")))
-	metrics.add_child(_make_stat_card("Inativos", str(stats.get("inactive", 0)), "Fora da operação", RED, trends.get("Inativos", {}), Callable(self, "_show_list_with_status").bind("inativo")))
+	if _is_regional_branch():
+		metrics.add_child(_make_stat_card("Inativos", str(stats.get("inactive", 0)), "Fora da operação", RED, trends.get("Inativos", {}), Callable(self, "_show_list_with_status").bind("inativo")))
+	else:
+		metrics.add_child(_make_stat_card("Em reserva", str(stats.get("reserved", 0)), "Aparelhos em reserva", YELLOW, trends.get("Em reserva", trends.get("Reserva", {})), Callable(self, "_show_list_with_status").bind("reserva")))
+		metrics.add_child(_make_stat_card("Em manutenção", str(stats.get("maintenance", 0)), "Encaminhados para revisão", ORANGE, trends.get("Em manutenção", trends.get("Manutencoes", {})), Callable(self, "_show_list_with_status").bind("manutencao")))
+		metrics.add_child(_make_stat_card("Inativos", str(stats.get("inactive", 0)), "Fora da operação", RED, trends.get("Inativos", {}), Callable(self, "_show_list_with_status").bind("inativo")))
 
 	var charts := HBoxContainer.new()
 	charts.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -16727,26 +16737,16 @@ func _request_online_lookup_from_search() -> void:
 	if online_lookup_request == null:
 		return
 
-	if not _grupo_rs_supports_modern_api():
-		if online_lookup_request:
-			online_lookup_request.cancel_request()
-		online_lookup_last_query = query
-		_render_online_lookup_message("Consultando o Grupo RS antigo...", true)
-		var legacy_rows := await _fetch_grupo_rs_equipment_rows(query)
-		if legacy_rows.is_empty():
-			_render_online_lookup_message("Nenhum resultado online para \"%s\"." % online_lookup_last_query, false)
-			return
-		_render_online_lookup_rows(legacy_rows)
-		return
-
 	online_lookup_last_query = query
-	_render_online_lookup_message("Consultando o Grupo RS online...", true)
+	_render_online_lookup_message("Consultando API Grupo RS...", true)
 	online_lookup_request.cancel_request()
-
-	var url := _grupo_rs_lookup_url(query)
-	var error := online_lookup_request.request(url)
-	if error != OK:
-		_render_online_lookup_message("Nao foi possivel iniciar a consulta online.", false)
+	var rows := await _fetch_grupo_rs_equipment_rows(query)
+	if online_lookup_last_query != query:
+		return
+	if rows.is_empty():
+		_render_online_lookup_message("Nenhum resultado online para \"%s\"." % online_lookup_last_query, false)
+		return
+	_render_online_lookup_rows(rows)
 
 
 func _on_online_lookup_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
@@ -16796,13 +16796,14 @@ func _render_online_lookup_rows(rows: Array[Dictionary]) -> void:
 	header.add_child(_make_table_label("Chip", 190, false, BLUE_DARK, HORIZONTAL_ALIGNMENT_CENTER, 15))
 	header.add_child(_make_table_label("Telefone", 150, false, BLUE_DARK, HORIZONTAL_ALIGNMENT_CENTER, 15))
 	header.add_child(_make_table_label("Cadastro", 110, false, BLUE_DARK, HORIZONTAL_ALIGNMENT_CENTER, 15))
-	header.add_child(_make_table_label("Status atual", 112, false, BLUE_DARK, HORIZONTAL_ALIGNMENT_CENTER, 15))
+	header.add_child(_make_table_label("Status atual", 150, false, BLUE_DARK, HORIZONTAL_ALIGNMENT_CENTER, 15))
 	header.add_child(_make_table_label("Acoes", 118, false, BLUE_DARK, HORIZONTAL_ALIGNMENT_CENTER, 15))
 	online_lookup_body.add_child(header)
 
 	for online_product in rows:
 		online_lookup_body.add_child(_make_online_lookup_row(online_product))
-	_schedule_sga_status_for_products(rows)
+	if SGA_ENABLED:
+		_schedule_sga_status_for_products(rows)
 	_schedule_online_lookup_confirmed_api_reconcile(rows)
 
 
@@ -16826,33 +16827,33 @@ func _schedule_online_lookup_confirmed_api_reconcile(rows: Array[Dictionary]) ->
 	if bool(online_lookup_reconcile_running.get(serial, false)) or bool(online_lookup_reconcile_done.get(serial, false)):
 		return
 	online_lookup_reconcile_running[serial] = true
-	call_deferred("_reconcile_confirmed_api_vehicle_to_firebase", serial, plate, product.duplicate(true))
+	call_deferred("_reconcile_confirmed_api_vehicle_to_local_database", serial, plate, product.duplicate(true))
 
 
-func _reconcile_confirmed_api_vehicle_to_firebase(serial: String, plate: String, online_product: Dictionary = {}) -> void:
-	var result := await _sync_confirmed_api_vehicle_to_firebase(serial, plate, online_product)
+func _reconcile_confirmed_api_vehicle_to_local_database(serial: String, plate: String, online_product: Dictionary = {}) -> void:
+	var result := await _sync_confirmed_api_vehicle_to_local_database(serial, plate, online_product)
 	online_lookup_reconcile_running.erase(serial)
 	if bool(result.get("ok", false)):
 		online_lookup_reconcile_done[serial] = true
-		_log_system_action("Sincronizou vinculo confirmado Grupo RS", "API confirmou placa; Store e Firebase confirmados. Serie: %s" % serial, serial)
+		_log_system_action("Sincronizou vinculo confirmado Grupo RS", "API confirmou placa; Store e Banco local SQL confirmados. Serie: %s" % serial, serial)
 		_refresh_table()
 		_refresh_online_lookup_from_cache()
 	else:
 		_log_system_action_event(
 			"Sincronizacao pendente Grupo RS",
-			"%s | Serie: %s" % [str(result.get("message", "Firebase nao confirmou a sincronizacao do vinculo.")), serial],
+			"%s | Serie: %s" % [str(result.get("message", "Banco local SQL nao confirmou a sincronizacao do vinculo.")), serial],
 			serial,
 			{
-				"status": "progress" if bool(result.get("firebase_pending", false)) else "failed",
+				"status": "progress" if bool(result.get("local_database_pending", false)) else "failed",
 				"phase": "sincronizacao",
-				"operation": "api_confirmada_para_firebase",
-				"transport": "firebase",
-				"confirmation_pending": bool(result.get("firebase_pending", false)),
+				"operation": "api_confirmada_para_local_database",
+				"transport": "local_database",
+				"confirmation_pending": bool(result.get("local_database_pending", false)),
 			}
 		)
 
 
-func _sync_confirmed_api_vehicle_to_firebase(serial: String, plate: String = "", online_product: Dictionary = {}) -> Dictionary:
+func _sync_confirmed_api_vehicle_to_local_database(serial: String, plate: String = "", online_product: Dictionary = {}) -> Dictionary:
 	if store == null:
 		return {"ok": false, "message": "Store local indisponivel para recompor o espelho do Grupo RS."}
 	var clean_serial := _digits_only(serial)
@@ -16896,15 +16897,15 @@ func _sync_confirmed_api_vehicle_to_firebase(serial: String, plate: String = "",
 	var saved := store.upsert_product_replacing_sku(clean_serial, expected_product)
 	if saved.is_empty():
 		return {"ok": false, "message": "Falha ao marcar o espelho confirmado pela API."}
-	var firebase_result := await _ensure_firebase_modification_saved(clean_serial, saved)
-	if not bool(firebase_result.get("ok", false)):
+	var local_database_result := await _ensure_local_database_modification_saved(clean_serial, saved)
+	if not bool(local_database_result.get("ok", false)):
 		return {
 			"ok": false,
-			"firebase_pending": true,
+			"local_database_pending": true,
 			"product": saved,
-			"message": str(firebase_result.get("message", "O Firebase nao confirmou a leitura do espelho sincronizado.")),
+			"message": str(local_database_result.get("message", "O Banco local SQL nao confirmou a leitura do espelho sincronizado.")),
 		}
-	return {"ok": true, "product": saved, "firebase": firebase_result, "api": vehicle_result}
+	return {"ok": true, "product": saved, "local_database": local_database_result, "api": vehicle_result}
 
 func _make_online_lookup_row(product: Dictionary) -> Control:
 	var panel := PanelContainer.new()
@@ -16921,9 +16922,9 @@ func _make_online_lookup_row(product: Dictionary) -> Control:
 	row.add_child(_make_copyable_table_cell(str(product.get("serial", "")), 130, false, Color.BLACK, HORIZONTAL_ALIGNMENT_CENTER, 15))
 	row.add_child(_make_copyable_table_cell(_blank(str(product.get("plate", ""))), 130, false, Color.BLACK, HORIZONTAL_ALIGNMENT_CENTER, 15))
 	row.add_child(_make_copyable_table_cell(_blank(str(product.get("client", ""))), 270, true, Color.BLACK, HORIZONTAL_ALIGNMENT_CENTER, 15))
-	row.add_child(_make_copyable_table_cell(_blank(str(product.get("chip", ""))), 190, false, Color.BLACK, HORIZONTAL_ALIGNMENT_CENTER, 15))
-	row.add_child(_make_copyable_table_cell(_blank(str(product.get("phone", ""))), 150, false, Color.BLACK, HORIZONTAL_ALIGNMENT_CENTER, 15))
-	row.add_child(_make_copyable_table_cell(_blank(str(product.get("status", ""))), 110, false, Color.BLACK, HORIZONTAL_ALIGNMENT_CENTER, 15))
+	row.add_child(_make_copyable_table_cell(_grupo_rs_online_field_label(str(product.get("chip", ""))), 190, false, Color.BLACK, HORIZONTAL_ALIGNMENT_CENTER, 15))
+	row.add_child(_make_copyable_table_cell(_grupo_rs_online_field_label(str(product.get("phone", ""))), 150, false, Color.BLACK, HORIZONTAL_ALIGNMENT_CENTER, 15))
+	row.add_child(_make_copyable_table_cell(_grupo_rs_registration_status_label(str(product.get("status", ""))), 110, false, Color.BLACK, HORIZONTAL_ALIGNMENT_CENTER, 15))
 	row.add_child(_make_online_record_status_cell(action_product))
 
 	var actions := HBoxContainer.new()
@@ -16958,27 +16959,28 @@ func _make_online_lookup_row(product: Dictionary) -> Control:
 		sms_button.disabled = not _manual_sms_serial_is_024(serial)
 		sms_button.tooltip_text = "Enviar comando SMS" if not sms_button.disabled else "SMS disponivel somente para series 024"
 		actions.add_child(sms_button)
-	row_stack.add_child(_make_sga_status_strip(product))
+	if SGA_ENABLED:
+		row_stack.add_child(_make_sga_status_strip(product))
 
 	return panel
 
 
 func _make_online_record_status_cell(product: Dictionary) -> Control:
 	var wrap := CenterContainer.new()
-	wrap.custom_minimum_size = Vector2(112, 0)
+	wrap.custom_minimum_size = Vector2(150, 0)
 	var serial := _digits_only(_location_serial_for_product(product))
 	var cached := _cached_location_status_for_serial(serial)
-	var label_text := str(cached.get("label", "Consultar localizacao"))
+	var label_text := str(cached.get("label", "Não consultado"))
 	var color: Color = cached.get("color", MUTED)
 	if label_text == "Consultar localizacao":
-		label_text = "--"
+		label_text = "Não consultado"
 		color = MUTED
 
 	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(102, 36)
+	panel.custom_minimum_size = Vector2(142, 36)
 	panel.add_theme_stylebox_override("panel", _style_box(color.lightened(0.86), color.lightened(0.18), 1, 9))
 	var updated_at := str(cached.get("updated_at", "")).strip_edges()
-	panel.tooltip_text = "Status atual nos registros do Grupo RS"
+	panel.tooltip_text = "Status atual nos registros do Grupo RS: %s" % label_text
 	if updated_at != "":
 		panel.tooltip_text += "\nUltima comunicacao: %s" % updated_at
 	wrap.add_child(panel)
@@ -16992,6 +16994,34 @@ func _make_online_record_status_cell(product: Dictionary) -> Control:
 	label.add_theme_color_override("font_color", color)
 	panel.add_child(label)
 	return wrap
+
+
+func _grupo_rs_online_field_label(value: String) -> String:
+	var clean := value.strip_edges()
+	var key := _search_key(clean)
+	if clean == "" or clean == "-" or key in ["null", "none", "naoinformado"]:
+		return "Não informado"
+	return clean
+
+
+func _grupo_rs_registration_status_label(value: String) -> String:
+	var clean := value.strip_edges()
+	if clean == "" or clean == "-":
+		return "Não informado"
+	var key := _search_key(clean)
+	match key:
+		"a", "ativo", "active", "1", "true":
+			return "Ativo"
+		"i", "inativo", "inactive", "0", "false", "desativado", "desativada":
+			return "Inativo"
+		"r", "reserva", "reserved":
+			return "Reserva"
+		"e", "estoque", "stock":
+			return "Estoque"
+		"m", "manutencao", "maintenance":
+			return "Manutenção"
+		_:
+			return clean
 
 
 func _online_lookup_action_product(product: Dictionary) -> Dictionary:
@@ -17705,7 +17735,7 @@ func _cached_location_status_for_serial(serial: String) -> Dictionary:
 		return {"label": "Consultando", "color": Color("#0b6fae")}
 	var cached: Dictionary = location_status_cache.get(clean_serial, {})
 	if cached.is_empty():
-		return {"label": "Consultar localizacao", "color": Color("#0b6fae")}
+		return {"label": "Não consultado", "color": MUTED, "cache_state": "empty"}
 	return cached
 
 
@@ -19136,11 +19166,12 @@ func _grupo_rs_api_inventory_equipment_row(raw: Dictionary) -> Dictionary:
 	var equipment_id := _grupo_rs_api_equipment_id_from_row(data, true)
 	if serial_value == "" and equipment_id <= 0:
 		return {}
-	var plate_value := _grupo_rs_api_string_value(data, ["placa", "plate", "Placa"])
-	var client_value := _grupo_rs_api_string_value(data, ["cliente", "client", "Cliente", "nomeCliente", "nome_cliente"])
-	var chip_value := _grupo_rs_api_string_value(data, ["numeroChip", "numero_chip", "chip", "iccid"])
-	var phone_value := _grupo_rs_api_string_value(data, ["numeroTelefone", "numero_telefone", "telefone", "phone"])
-	var status_value := _grupo_rs_api_string_value(data, ["status", "situacao", "situacaoCadastro", "ativo"])
+	var plate_value := _grupo_rs_api_string_value(data, ["placa", "plate", "Placa", "PLACA"])
+	var client_value := _grupo_rs_api_string_value(data, ["cliente", "client", "Cliente", "CLIENTE", "nomeCliente", "nome_cliente"])
+	var chip_value := _grupo_rs_api_string_value(data, ["numeroChip", "NumeroChip", "numero_chip", "chip", "Chip", "iccid", "ICCID"])
+	var phone_value := _grupo_rs_api_string_value(data, ["numeroTelefone", "NumeroTelefone", "numero_telefone", "telefone", "Telefone", "phone"])
+	var status_value := _grupo_rs_api_string_value(data, ["status", "Status", "STATUS", "situacao", "Situacao", "situacaoCadastro", "SituacaoCadastro", "ativo", "Ativo"])
+	var operator_value := _grupo_rs_api_string_value(data, ["operadora", "Operadora", "operator", "Operator", "carrier", "Carrier"])
 	return {
 		"serial": serial_value,
 		"plate": plate_value,
@@ -19149,7 +19180,7 @@ func _grupo_rs_api_inventory_equipment_row(raw: Dictionary) -> Dictionary:
 		"phone": phone_value,
 		"apn": _grupo_rs_api_string_value(data, ["apn", "APN"]),
 		"model": _grupo_rs_api_model_label(data.get("codModelo", data.get("CodModelo", 0))),
-		"operator": _grupo_rs_api_operator_label(data.get("codOperadora", data.get("CodOperadora", 0))),
+		"operator": operator_value if operator_value != "" else _grupo_rs_api_operator_label(data.get("codOperadora", data.get("CodOperadora", 0))),
 		"codModelo": _grupo_rs_api_integer_value(data.get("codModelo", data.get("CodModelo", 0))),
 		"codOperadora": _grupo_rs_api_integer_value(data.get("codOperadora", data.get("CodOperadora", 0))),
 		"status": status_value,
@@ -21768,12 +21799,12 @@ func _modern_grupo_rs_page_is_login(html: String) -> bool:
 
 func _modern_grupo_rs_credentials() -> Dictionary:
 	var settings := _read_json_dictionary(SETTINGS_PATH)
-	var username := OS.get_environment("GRUPO_RS_MODERN_USER").strip_edges()
-	var password := OS.get_environment("GRUPO_RS_MODERN_PASSWORD")
+	var username := str(settings.get("grupo_rs_modern_user", "")).strip_edges()
+	var password := str(settings.get("grupo_rs_modern_password", ""))
 	if username == "":
-		username = str(settings.get("grupo_rs_modern_user", "")).strip_edges()
+		username = OS.get_environment("GRUPO_RS_MODERN_USER").strip_edges()
 	if password == "":
-		password = str(settings.get("grupo_rs_modern_password", ""))
+		password = OS.get_environment("GRUPO_RS_MODERN_PASSWORD")
 	if username == "":
 		username = DEFAULT_GRUPO_RS_MODERN_USER
 	if password == "":
@@ -21827,12 +21858,12 @@ func _grupo_rs_api_headers(json_body: bool = false) -> PackedStringArray:
 
 func _grupo_rs_api_credentials() -> Dictionary:
 	var settings := _read_json_dictionary(SETTINGS_PATH)
-	var username := OS.get_environment("GRUPO_RS_API_USER").strip_edges()
-	var password := OS.get_environment("GRUPO_RS_API_PASSWORD")
+	var username := str(settings.get("grupo_rs_api_user", "")).strip_edges()
+	var password := str(settings.get("grupo_rs_api_password", ""))
 	if username == "":
-		username = str(settings.get("grupo_rs_api_user", "")).strip_edges()
+		username = OS.get_environment("GRUPO_RS_API_USER").strip_edges()
 	if password == "":
-		password = str(settings.get("grupo_rs_api_password", ""))
+		password = OS.get_environment("GRUPO_RS_API_PASSWORD")
 	if username.begins_with("http://") or username.begins_with("https://"):
 		# Versoes antigas gravavam a URL da documentacao no campo de usuario.
 		# O login correto deve reutilizar as credenciais do portal quando nao ha usuario API separado.
@@ -21857,7 +21888,7 @@ func _grupo_rs_api_login_with_credentials(username: String, password: String) ->
 		grupo_rs_api_health_state = "not_configured"
 		return {"ok": false, "message": grupo_rs_api_last_error, "state": "not_configured", "stage": "auth"}
 
-	var response := await _sga_http_post_json(
+	var response := await _http_post_json_with_headers(
 		_grupo_rs_api_url("/endpoints/v1/auth/login.php"),
 		{"usuario": clean_username, "senha": clean_password},
 		_grupo_rs_api_headers(true)
@@ -22144,8 +22175,9 @@ func _grupo_rs_api_error_message(response: Dictionary, fallback: String) -> Stri
 func _grupo_rs_api_equipment_rows(payload: Variant) -> Array[Dictionary]:
 	if typeof(payload) == TYPE_DICTIONARY:
 		var data: Dictionary = payload as Dictionary
-		if data.has("equipamentos"):
-			return _grupo_rs_api_extract_rows(data.get("equipamentos"))
+		for key in ["equipamentos", "Equipamentos", "equipment", "equipments", "trackers"]:
+			if data.has(key):
+				return _grupo_rs_api_extract_rows(data.get(key))
 	return _grupo_rs_api_extract_rows(payload)
 
 
@@ -22655,9 +22687,15 @@ func _grupo_rs_api_extract_rows(value: Variant) -> Array[Dictionary]:
 
 func _grupo_rs_api_string_value(data: Dictionary, keys: Array[String]) -> String:
 	for key in keys:
-		if not data.has(key):
+		var resolved_key := key
+		if not data.has(resolved_key):
+			for candidate_key in data.keys():
+				if str(candidate_key).strip_edges().to_lower() == key.strip_edges().to_lower():
+					resolved_key = str(candidate_key)
+					break
+		if not data.has(resolved_key):
 			continue
-		var raw: Variant = data.get(key)
+		var raw: Variant = data.get(resolved_key)
 		if raw == null:
 			continue
 		if typeof(raw) == TYPE_DICTIONARY:
@@ -23420,8 +23458,9 @@ func _grupo_rs_api_find_location(serial: String, plate: String, vehicle_id: Stri
 			direct_response["stage"] = "auth" if int(direct_response.get("response_code", 0)) == 401 else "location"
 			direct_response["parse_ok"] = true
 			return direct_response
-		var direct_payload: Variant = JSON.parse_string(str(direct_response.get("body", "")))
-		if direct_payload == null:
+		var direct_json := JSON.new()
+		var direct_parse_error := direct_json.parse(str(direct_response.get("body", "")))
+		if direct_parse_error != OK:
 			return {
 				"ok": false,
 				"message": "A API retornou JSON invalido para a localizacao consultada.",
@@ -23429,6 +23468,7 @@ func _grupo_rs_api_find_location(serial: String, plate: String, vehicle_id: Stri
 				"response_code": int(direct_response.get("response_code", 0)),
 				"parse_ok": false,
 			}
+		var direct_payload: Variant = direct_json.data
 		var direct_rows: Array[Dictionary] = []
 		for raw in _grupo_rs_api_extract_rows(direct_payload):
 			direct_rows.append(_grupo_rs_api_normalize_location(raw))
@@ -23700,12 +23740,12 @@ func _legacy_grupo_rs_credentials() -> Dictionary:
 	var branch_id := selected_branch_id.strip_edges().to_lower()
 	if branch_id in ["araguaina", "acailandia", "maraba"]:
 		return _legacy_grupo_rs_credentials_for_branch(branch_id, settings)
-	var username := OS.get_environment("GRUPO_RS_LEGACY_USER").strip_edges()
-	var password := OS.get_environment("GRUPO_RS_LEGACY_PASSWORD")
+	var username := str(settings.get("grupo_rs_legacy_user", "")).strip_edges()
+	var password := str(settings.get("grupo_rs_legacy_password", ""))
 	if username == "":
-		username = str(settings.get("grupo_rs_legacy_user", "")).strip_edges()
+		username = OS.get_environment("GRUPO_RS_LEGACY_USER").strip_edges()
 	if password == "":
-		password = str(settings.get("grupo_rs_legacy_password", ""))
+		password = OS.get_environment("GRUPO_RS_LEGACY_PASSWORD")
 	if username == "":
 		username = DEFAULT_GRUPO_RS_MODERN_USER
 	if password == "":
@@ -24016,22 +24056,22 @@ func _arya_json_request_headers() -> PackedStringArray:
 
 
 func _arya_token() -> String:
-	var env_token := OS.get_environment("ARYA_JWT_TOKEN").strip_edges()
-	if env_token != "":
-		return env_token
 	var settings := _read_json_dictionary(SETTINGS_PATH)
-	return str(settings.get("arya_token", "")).strip_edges()
+	var token := str(settings.get("arya_token", "")).strip_edges()
+	return token if token != "" else OS.get_environment("ARYA_JWT_TOKEN").strip_edges()
 
 
 func _arya_credentials() -> Dictionary:
-	var env_email := OS.get_environment("ARYA_EMAIL").strip_edges()
-	var env_password := OS.get_environment("ARYA_PASSWORD")
-	if env_email != "" and env_password != "":
-		return {"email": env_email, "password": env_password}
 	var settings := _read_json_dictionary(SETTINGS_PATH)
+	var email := str(settings.get("arya_email", "")).strip_edges()
+	var password := str(settings.get("arya_password", ""))
+	if email == "":
+		email = OS.get_environment("ARYA_EMAIL").strip_edges()
+	if password == "":
+		password = OS.get_environment("ARYA_PASSWORD")
 	return {
-		"email": str(settings.get("arya_email", "")).strip_edges(),
-		"password": str(settings.get("arya_password", "")),
+		"email": email,
+		"password": password,
 	}
 
 
@@ -25835,7 +25875,6 @@ func _build_bulk_command_toolbar() -> Control:
 	if not _is_regional_branch():
 		groups.add_child(_make_bulk_action_group("CONSULTAS", [
 			_make_action_button("Consultar clientes", BLUE_DARK, BLUE_DARK, Color.WHITE, Vector2(176, 40), _request_bulk_client_tracker_lookup),
-			_make_action_button("Consultar SGA", BLUE, BLUE, Color.WHITE, Vector2(156, 40), _request_bulk_client_sga_lookup),
 		]))
 		groups.add_child(_make_bulk_toolbar_separator())
 	bulk_analysis_button = _make_action_button("Analisar dados", Color("#eef6fd"), Color("#cfe0ef"), BLUE_DARK, Vector2(124, 40), _request_bulk_analysis)
@@ -27426,7 +27465,7 @@ func _populate_system_log_health_strip(strip: HBoxContainer, logs: Array[Diction
 		child.queue_free()
 	var metrics := _system_log_extended_metrics(logs)
 	_add_system_log_health_item(strip, "API principal", "operante", GREEN)
-	_add_system_log_health_item(strip, "Firebase", "sincronizado" if store != null and store.is_remote_available() else "pendente", BLUE)
+	_add_system_log_health_item(strip, "Banco local SQL", "sincronizado" if store != null and store.is_remote_available() else "pendente", BLUE)
 	_add_system_log_health_item(strip, "Fallback web", str(metrics.get("fallback", 0)), ORANGE)
 	_add_system_log_health_item(strip, "HTTP 5xx", str(metrics.get("http_5xx", 0)), RED if int(metrics.get("http_5xx", 0)) > 0 else GREEN)
 	var pending := int(store.get_pending_sync_status().get("count", 0)) if store != null else 0
@@ -28756,13 +28795,13 @@ func _system_log_origin(entry: Dictionary) -> String:
 		return "API Grupo RS"
 	if transport == "web":
 		return "Portal web"
-	if transport == "firebase":
-		return "Firebase"
+	if transport == "local_database":
+		return "Banco local SQL"
 	var joined := ("%s %s" % [str(entry.get("action", "")), str(entry.get("details", ""))]).to_lower()
 	if joined.contains("api"):
 		return "API Grupo RS"
-	if joined.contains("firebase"):
-		return "Firebase"
+	if joined.contains("local_database"):
+		return "Banco local SQL"
 	return "Sistema local"
 
 
@@ -29711,7 +29750,7 @@ func _assistant_local_answer(question: String) -> String:
 		return _assistant_describe_product(product)
 
 	if _assistant_has_any(q, ["ajuda", "oquevocefaz", "oquevocepode", "comofunciona", "chat"]):
-		var capabilities := "consultar o Firebase, resumir a plataforma, explicar status de aparelho por serie ou placa, verificar manutencoes, Bat. Int, operadoras, caches de online/off e alertas do Assistente Autonomo"
+		var capabilities := "consultar o Banco local SQL, resumir a plataforma, explicar status de aparelho por serie ou placa, verificar manutencoes, Bat. Int, operadoras, caches de online/off e alertas do Assistente Autonomo"
 		if _branch_supports_sms():
 			capabilities += " e monitor SMS"
 		return "Eu consigo %s." % capabilities
@@ -30932,7 +30971,7 @@ func _build_system_health_view() -> Control:
 	stack.add_theme_constant_override("separation", 12)
 	margin.add_child(stack)
 	stack.add_child(_make_health_line("Filial", selected_branch_name))
-	stack.add_child(_make_health_line("Armazenamento", str(health.get("storage_mode", "Firebase online"))))
+	stack.add_child(_make_health_line("Armazenamento", str(health.get("storage_mode", "SQLite local"))))
 	stack.add_child(_make_health_line("Dados liberados", "Sim" if bool(health.get("remote_available", false)) else "Nao"))
 	stack.add_child(_make_health_line("Cadastros", str(health.get("products", 0))))
 	stack.add_child(_make_health_line("Movimentos", str(health.get("movements", 0))))
@@ -30993,7 +31032,7 @@ func _build_arya_config_view() -> Control:
 	nav_title.add_theme_font_size_override("font_size", 10)
 	nav_title.add_theme_color_override("font_color", MUTED)
 	nav.add_child(nav_title)
-	nav.add_child(_make_config_nav_button("Servidor", "firebase"))
+	nav.add_child(_make_config_nav_button("Servidor", "local_database"))
 	nav.add_child(_make_config_nav_button("Arya", "arya"))
 	nav.add_child(_make_config_nav_button("Grupo RS", "grupo_rs"))
 	var regional_title := Label.new()
@@ -31007,13 +31046,12 @@ func _build_arya_config_view() -> Control:
 	nav.add_child(_make_config_nav_button("Araguaina", "grupo_rs_araguaina"))
 	nav.add_child(_make_config_nav_button("Acailandia", "grupo_rs_acailandia"))
 	nav.add_child(_make_config_nav_button("Maraba", "grupo_rs_maraba"))
-	nav.add_child(_make_config_nav_button("SGA", "sga"))
 	nav.add_child(_make_config_nav_button("Link Solutions", "linksolutions"))
 	if _branch_supports_sms():
 		nav.add_child(_make_config_nav_button("SMS", "sms"))
 	nav.add_child(_make_config_nav_button("Atualizacoes", "updates"))
 	var safe_note := Label.new()
-	safe_note.text = "Credenciais protegidas\npor este computador."
+	safe_note.text = "Credenciais operacionais\npor filial no Banco local SQL."
 	safe_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	safe_note.add_theme_font_override("font", UI_FONT)
 	safe_note.add_theme_font_size_override("font_size", 10)
@@ -31050,8 +31088,8 @@ func _build_arya_config_view() -> Control:
 		_build_config_vault_toolbar(stack)
 
 	match config_selected_section:
-		"firebase":
-			_build_config_firebase_section(stack)
+		"local_database":
+			_build_config_local_database_section(stack)
 		"grupo_rs":
 			_build_config_grupo_rs_section(stack, settings)
 		"grupo_rs_araguaina":
@@ -31060,8 +31098,6 @@ func _build_arya_config_view() -> Control:
 			_build_config_legacy_branch_page(stack, settings, "acailandia")
 		"grupo_rs_maraba":
 			_build_config_legacy_branch_page(stack, settings, "maraba")
-		"sga":
-			_build_config_sga_section(stack, settings)
 		"linksolutions":
 			_build_config_linksolutions_section(stack, settings)
 		"sms":
@@ -31078,42 +31114,28 @@ func _build_arya_config_view() -> Control:
 	return root
 
 
-func _build_config_firebase_section(stack: VBoxContainer) -> void:
+func _build_config_local_database_section(stack: VBoxContainer) -> void:
 	_add_config_section_heading(
 		stack,
-		"Servidor Firebase",
-		"Fonte unica dos cadastros, manutencoes, logs e estado do monitor automatico."
+		"Banco local SQL",
+		"Fonte unica do estoque por filial. Funciona sem internet e grava diretamente no SQLite local."
 	)
-	var firebase_sync := _firebase_sync()
-	var summary: Dictionary = firebase_sync.call("get_configuration_summary") if firebase_sync != null else {}
+	var local_database_sync := _local_database_sync()
+	var summary: Dictionary = local_database_sync.call("get_configuration_summary") if local_database_sync != null else {}
 
-	firebase_url_input = LineEdit.new()
-	firebase_url_input.text = str(summary.get("database_url", ""))
-	firebase_url_input.placeholder_text = "https://seu-projeto-default-rtdb.firebaseio.com"
-	firebase_url_input.custom_minimum_size = Vector2(0, 46)
-	_style_line_edit(firebase_url_input)
-	stack.add_child(_make_labeled_control("URL do Realtime Database", firebase_url_input))
-
-	firebase_api_key_input = LineEdit.new()
-	firebase_api_key_input.text = str(summary.get("api_key", ""))
-	firebase_api_key_input.placeholder_text = "Chave Web API do Firebase"
-	firebase_api_key_input.secret = true
-	firebase_api_key_input.custom_minimum_size = Vector2(0, 46)
-	_style_line_edit(firebase_api_key_input)
-
-	firebase_refresh_token_input = LineEdit.new()
-	firebase_refresh_token_input.placeholder_text = "Token salvo; deixe vazio para manter" \
-		if bool(summary.get("has_refresh_token", false)) else "Refresh token da conta autorizada"
-	firebase_refresh_token_input.secret = true
-	firebase_refresh_token_input.custom_minimum_size = Vector2(0, 46)
-	_style_line_edit(firebase_refresh_token_input)
-	var credentials_grid := _make_config_grid(2)
-	stack.add_child(credentials_grid)
-	credentials_grid.add_child(_make_labeled_control("Chave Web API", firebase_api_key_input))
-	credentials_grid.add_child(_make_labeled_control("Refresh token", firebase_refresh_token_input))
+	local_database_url_input = LineEdit.new()
+	local_database_url_input.text = str(summary.get("database", "C:/GRUPO RS CENTRAL/database/grupo_rs_central.sqlite"))
+	local_database_url_input.placeholder_text = "C:/GRUPO RS CENTRAL/database/grupo_rs_central.sqlite"
+	local_database_url_input.editable = false
+	local_database_url_input.custom_minimum_size = Vector2(0, 46)
+	_style_line_edit(local_database_url_input)
+	stack.add_child(_make_labeled_control("Arquivo do banco SQLite", local_database_url_input))
 
 	var device_label := Label.new()
-	device_label.text = "Identificador deste computador: %s" % str(summary.get("device_id", "nao gerado"))
+	device_label.text = "Filial atual: %s | Provedor: %s | Internet: nao obrigatoria" % [
+		str(summary.get("branch", selected_branch_id)),
+		str(summary.get("provider", "SQLite local")),
+	]
 	device_label.add_theme_font_override("font", UI_FONT)
 	device_label.add_theme_font_size_override("font_size", 14)
 	device_label.add_theme_color_override("font_color", MUTED)
@@ -31122,36 +31144,28 @@ func _build_config_firebase_section(stack: VBoxContainer) -> void:
 	var actions := HBoxContainer.new()
 	actions.add_theme_constant_override("separation", 10)
 	stack.add_child(actions)
-	actions.add_child(_make_action_button("Salvar e conectar", BLUE, BLUE, Color.WHITE, Vector2(190, 46), _save_firebase_configuration))
-	actions.add_child(_make_action_button("Testar", ORANGE, ORANGE, Color("#17212b"), Vector2(120, 46), _retry_online_connection))
+	actions.add_child(_make_action_button("Validar banco", BLUE, BLUE, Color.WHITE, Vector2(170, 46), _save_local_database_configuration))
+	actions.add_child(_make_action_button("Recarregar dados", ORANGE, ORANGE, Color("#17212b"), Vector2(170, 46), _retry_online_connection))
 
-	firebase_config_status_label = Label.new()
-	firebase_config_status_label.text = "Servidor configurado." if bool(summary.get("configured", false)) else "Servidor ainda nao configurado."
-	firebase_config_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	firebase_config_status_label.add_theme_font_override("font", UI_FONT)
-	firebase_config_status_label.add_theme_font_size_override("font_size", 15)
-	firebase_config_status_label.add_theme_color_override("font_color", GREEN if bool(summary.get("configured", false)) else RED)
-	stack.add_child(firebase_config_status_label)
+	local_database_config_status_label = Label.new()
+	local_database_config_status_label.text = "Banco SQLite local configurado e disponivel." if bool(summary.get("configured", false)) else "Banco SQLite local indisponivel."
+	local_database_config_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	local_database_config_status_label.add_theme_font_override("font", UI_FONT)
+	local_database_config_status_label.add_theme_font_size_override("font_size", 15)
+	local_database_config_status_label.add_theme_color_override("font_color", GREEN if bool(summary.get("configured", false)) else RED)
+	stack.add_child(local_database_config_status_label)
 
 
-func _save_firebase_configuration() -> void:
-	if not _require_config_vault_access():
+func _save_local_database_configuration() -> void:
+	var local_database_sync := _local_database_sync()
+	if local_database_sync == null:
+		_show_error("Banco local SQL", "Servico SQLite local indisponivel.")
 		return
-	var firebase_sync := _firebase_sync()
-	if firebase_sync == null:
-		_show_error("Firebase", "Modulo do servidor indisponivel.")
+	var checked: Variant = await local_database_sync.call("refresh_remote", true)
+	if typeof(checked) != TYPE_DICTIONARY or not bool((checked as Dictionary).get("ok", false)):
+		_show_error("Banco local SQL", "Nao foi possivel validar a leitura do SQLite local.")
 		return
-	var saved := bool(firebase_sync.call("configure_account", {
-		"database_url": firebase_url_input.text if firebase_url_input != null else "",
-		"api_key": firebase_api_key_input.text if firebase_api_key_input != null else "",
-		"refresh_token": firebase_refresh_token_input.text if firebase_refresh_token_input != null else "",
-	}))
-	if not saved:
-		_show_warning("Firebase", "Informe URL, chave Web API e um refresh token valido.")
-		return
-	if firebase_refresh_token_input != null:
-		firebase_refresh_token_input.clear()
-	_show_success("Firebase", "Configuracao salva. Conectando ao servidor...")
+	_show_success("Banco local SQL", "Leitura do SQLite validada. O sistema esta pronto para uso offline.")
 
 
 func _show_config_section(section_key: String) -> void:
@@ -31164,7 +31178,7 @@ func _show_config_section(section_key: String) -> void:
 
 
 func _config_section_requires_vault(section_key: String) -> bool:
-	return section_key != "updates"
+	return section_key not in ["updates", "local_database"]
 
 
 func _build_config_vault_unlock(stack: VBoxContainer) -> void:
@@ -31339,15 +31353,6 @@ func _populate_unlocked_config_credentials(settings: Dictionary) -> void:
 	_reveal_config_line_edit(experttexting_api_key_input, str(settings.get("experttexting_api_key", "")))
 	_reveal_config_line_edit(experttexting_api_secret_input, str(settings.get("experttexting_api_secret", "")))
 	_reveal_config_line_edit(openai_api_key_input, str(settings.get("openai_api_key", "")))
-	if vault != null:
-		_reveal_config_line_edit(
-			firebase_api_key_input,
-			str(vault.call("get_secret", "firebase", "api_key", ""))
-		)
-		_reveal_config_line_edit(
-			firebase_refresh_token_input,
-			str(vault.call("get_secret", "firebase", "refresh_token", ""))
-		)
 
 
 func _reveal_config_line_edit(input: Variant, value: String, keep_secret_style: bool = true) -> void:
@@ -31391,7 +31396,7 @@ func _make_config_nav_button(text_value: String, section_key: String) -> Button:
 
 func _config_nav_icon_path(section_key: String) -> String:
 	match section_key:
-		"firebase":
+		"local_database":
 			return ICON_DIR + "navigation/communications.svg"
 		"arya", "codex", "luna":
 			return ICON_DIR + "navigation/guardian.svg"
@@ -31732,84 +31737,6 @@ func _build_config_legacy_branch_page(stack: VBoxContainer, settings: Dictionary
 	grupo_rs_legacy_status_label.add_theme_color_override("font_color", MUTED)
 	card.add_child(grupo_rs_legacy_status_label)
 	_set_legacy_grupo_rs_config_status("Preencha a URL, o login e a senha de %s." % branch_name, MUTED)
-
-
-func _build_config_sga_section(stack: VBoxContainer, _settings: Dictionary) -> void:
-	_add_config_section_heading(stack, "SGA Hinova", "Credenciais separadas para rastreio e protecao.")
-	_build_config_sga_source_section(stack, SGA_SOURCE_RASTREIO)
-	_add_config_separator(stack)
-	_build_config_sga_source_section(stack, SGA_SOURCE_PROTECAO)
-
-
-func _build_config_sga_source_section(stack: VBoxContainer, source: String) -> void:
-	var credentials := _sga_credentials(source)
-	var source_title := Label.new()
-	source_title.text = "SGA de %s" % _sga_source_label(source)
-	source_title.add_theme_font_override("font", UI_FONT)
-	source_title.add_theme_font_size_override("font_size", 19)
-	source_title.add_theme_color_override("font_color", TEXT)
-	stack.add_child(source_title)
-
-	var token_input := LineEdit.new()
-	token_input.placeholder_text = "Token gerado em APIs > Gerenciar APIs%s" % (" (ja salvo)" if str(credentials.get("api_token", "")) != "" else "")
-	token_input.secret = true
-	token_input.custom_minimum_size = Vector2(0, 46)
-	token_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_style_line_edit(token_input)
-
-	var user_input := LineEdit.new()
-	user_input.text = str(credentials.get("username", ""))
-	user_input.placeholder_text = "Usuario exclusivo da integracao"
-	user_input.custom_minimum_size = Vector2(0, 46)
-	user_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_style_line_edit(user_input)
-
-	var password_input := LineEdit.new()
-	password_input.placeholder_text = "Senha do usuario%s" % (" (ja salva)" if str(credentials.get("password", "")) != "" else "")
-	password_input.secret = true
-	password_input.custom_minimum_size = Vector2(0, 46)
-	password_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_style_line_edit(password_input)
-	var credential_grid := _make_config_grid(3)
-	stack.add_child(credential_grid)
-	credential_grid.add_child(_make_labeled_control("Token da API", token_input))
-	credential_grid.add_child(_make_labeled_control("Usuario SGA", user_input))
-	credential_grid.add_child(_make_labeled_control("Senha SGA", password_input))
-
-	var status_label := Label.new()
-	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	status_label.add_theme_font_override("font", UI_FONT)
-	status_label.add_theme_font_size_override("font_size", 16)
-	status_label.add_theme_color_override("font_color", MUTED)
-
-	if source == SGA_SOURCE_PROTECAO:
-		sga_protecao_api_token_input = token_input
-		sga_protecao_user_input = user_input
-		sga_protecao_password_input = password_input
-		sga_protecao_status_label = status_label
-	else:
-		sga_rastreio_api_token_input = token_input
-		sga_rastreio_user_input = user_input
-		sga_rastreio_password_input = password_input
-		sga_rastreio_status_label = status_label
-
-	var actions := HBoxContainer.new()
-	actions.add_theme_constant_override("separation", 10)
-	stack.add_child(actions)
-	actions.add_child(_make_action_button("Salvar e conectar", BLUE, BLUE, Color.WHITE, Vector2(190, 44), Callable(self, "_test_sga_credentials").bind(source)))
-	actions.add_child(_make_action_button("Testar", YELLOW, YELLOW, Color.WHITE, Vector2(110, 44), Callable(self, "_test_sga_saved_access").bind(source)))
-	actions.add_child(_make_action_button("Limpar acesso", Color("#6c757d"), Color("#6c757d"), Color.WHITE, Vector2(155, 44), Callable(self, "_clear_sga_credentials").bind(source)))
-	stack.add_child(status_label)
-
-	var token_issue := _sga_api_token_validation_message(str(credentials.get("api_token", "")))
-	if token_issue != "":
-		_set_sga_config_status(source, token_issue, RED)
-	elif not _sga_source_configured(source):
-		_set_sga_config_status(source, "Aguardando token API, usuario e senha.", MUTED)
-	elif str(credentials.get("user_token", "")).strip_edges() == "":
-		_set_sga_config_status(source, "Credenciais salvas. Clique em Salvar e conectar para autenticar.", YELLOW)
-	else:
-		_set_sga_config_status(source, "Acesso salvo. Clique em Testar para confirmar a API.", GREEN)
 
 
 func _build_config_linksolutions_section(stack: VBoxContainer, settings: Dictionary) -> void:
@@ -32596,132 +32523,6 @@ func _set_modern_grupo_rs_config_status(message: String, color: Color) -> void:
 	grupo_rs_modern_status_label.add_theme_color_override("font_color", color)
 
 
-func _sga_config_inputs(source: String) -> Dictionary:
-	if source == SGA_SOURCE_PROTECAO:
-		return {
-			"api_token": sga_protecao_api_token_input,
-			"username": sga_protecao_user_input,
-			"password": sga_protecao_password_input,
-		}
-	return {
-		"api_token": sga_rastreio_api_token_input,
-		"username": sga_rastreio_user_input,
-		"password": sga_rastreio_password_input,
-	}
-
-
-func _save_sga_credentials(source: String) -> bool:
-	if not _require_config_vault_access():
-		return false
-	var inputs := _sga_config_inputs(source)
-	var token_input: LineEdit = inputs.get("api_token")
-	var user_input: LineEdit = inputs.get("username")
-	var password_input: LineEdit = inputs.get("password")
-	var settings := _read_json_dictionary(SETTINGS_PATH)
-	var token_key := _sga_setting_key(source, "api_token")
-	var user_key := _sga_setting_key(source, "user")
-	var password_key := _sga_setting_key(source, "password")
-	var previous_token := str(settings.get(token_key, "")).strip_edges()
-	var previous_user := str(settings.get(user_key, "")).strip_edges()
-	var previous_password := str(settings.get(password_key, ""))
-	var api_token := str(token_input.text if token_input else "").strip_edges()
-	var username := str(user_input.text if user_input else "").strip_edges()
-	var password := str(password_input.text if password_input else "")
-	if api_token == "":
-		api_token = previous_token
-	if username == "":
-		username = previous_user
-	if password == "":
-		password = previous_password
-	if api_token == "" or username == "" or password == "":
-		_set_sga_config_status(source, "Informe token API, usuario e senha do SGA %s." % _sga_source_label(source), YELLOW)
-		return false
-	var token_issue := _sga_api_token_validation_message(api_token)
-	if token_issue != "":
-		_set_sga_config_status(source, token_issue, RED)
-		return false
-
-	settings[token_key] = api_token
-	settings[user_key] = username
-	settings[password_key] = password
-	settings[_sga_setting_key(source, "saved_at")] = Time.get_datetime_string_from_system(false, true)
-	settings["integrations_credentials_saved_at"] = Time.get_datetime_string_from_system(false, true)
-	if api_token != previous_token or username != previous_user or password != previous_password:
-		settings.erase(_sga_setting_key(source, "user_token"))
-		settings.erase(_sga_setting_key(source, "user_token_saved_at"))
-		_remove_app_vault_secrets(PackedStringArray([
-			_sga_setting_key(source, "user_token"),
-		]))
-	_write_json_dictionary(SETTINGS_PATH, settings)
-	if token_input:
-		token_input.clear()
-		token_input.placeholder_text = "Token gerado em APIs > Gerenciar APIs (ja salvo)"
-	if password_input:
-		password_input.clear()
-		password_input.placeholder_text = "Senha do usuario (ja salva)"
-	if user_input:
-		user_input.text = username
-	sga_status_cache.clear()
-	_register_integrations_credentials_log()
-	return true
-
-
-func _test_sga_credentials(source: String) -> void:
-	if not _save_sga_credentials(source):
-		return
-	_set_sga_config_status(source, "Autenticando no SGA %s..." % _sga_source_label(source), BLUE_DARK)
-	var result := await _ensure_sga_user_token(source, true)
-	if not bool(result.get("ok", false)):
-		_set_sga_config_status(source, str(result.get("message", "Falha na autenticacao SGA.")), RED)
-		return
-	_set_sga_config_status(source, "SGA %s conectado. Consultas somente leitura liberadas." % _sga_source_label(source), GREEN)
-	_show_success("SGA %s" % _sga_source_label(source), "Integracao conectada com sucesso.")
-
-
-func _test_sga_saved_access(source: String) -> void:
-	if not _sga_source_configured(source):
-		_set_sga_config_status(source, "Configure o acesso antes de testar.", YELLOW)
-		return
-	_set_sga_config_status(source, "Testando autenticacao salva...", BLUE_DARK)
-	var result := await _ensure_sga_user_token(source, true)
-	if not bool(result.get("ok", false)):
-		_set_sga_config_status(source, str(result.get("message", "Acesso SGA recusado.")), RED)
-		return
-	_set_sga_config_status(source, "API SGA %s autenticada e pronta para consultas." % _sga_source_label(source), GREEN)
-
-
-func _clear_sga_credentials(source: String) -> void:
-	if not _require_config_vault_access():
-		return
-	var settings := _read_json_dictionary(SETTINGS_PATH)
-	for suffix in ["api_token", "user", "password", "user_token", "user_token_saved_at", "saved_at"]:
-		settings.erase(_sga_setting_key(source, suffix))
-	_remove_app_vault_secrets(PackedStringArray([
-		_sga_setting_key(source, "api_token"),
-		_sga_setting_key(source, "user"),
-		_sga_setting_key(source, "password"),
-		_sga_setting_key(source, "user_token"),
-	]))
-	_write_json_dictionary(SETTINGS_PATH, settings)
-	sga_status_cache.clear()
-	sga_status_busy.clear()
-	sga_status_queue.clear()
-	var inputs := _sga_config_inputs(source)
-	for key in ["api_token", "username", "password"]:
-		var input: LineEdit = inputs.get(key)
-		if input:
-			input.clear()
-	_set_sga_config_status(source, "Acesso removido.", MUTED)
-
-
-func _set_sga_config_status(source: String, message: String, color: Color) -> void:
-	var label := sga_protecao_status_label if source == SGA_SOURCE_PROTECAO else sga_rastreio_status_label
-	if label == null or not is_instance_valid(label):
-		return
-	label.text = message
-	label.add_theme_color_override("font_color", color)
-
-
 func _save_linksolutions_credentials() -> bool:
 	if not _require_config_vault_access():
 		return false
@@ -32988,854 +32789,6 @@ func _set_arya_config_status(message: String, color: Color) -> void:
 		arya_config_status_label.add_theme_color_override("font_color", color)
 
 
-func _sga_source_label(source: String) -> String:
-	return "Protecao" if source == SGA_SOURCE_PROTECAO else "Rastreio"
-
-
-func _sga_api_token_validation_message(token: String) -> String:
-	var clean_token := token.strip_edges()
-	if clean_token == "":
-		return ""
-	var lower := clean_token.to_lower()
-	if lower.begins_with("http://") or lower.begins_with("https://") or lower.contains("hinova.com.br/"):
-		return "O campo Token da API recebeu a URL do portal. Use o token gerado em APIs > Gerenciar APIs."
-	if clean_token.is_valid_int() and clean_token.length() <= 10:
-		return "O codigo do cliente nao e o Token da API. Gere ou copie o token em APIs > Gerenciar APIs."
-	return ""
-
-
-func _sga_setting_key(source: String, suffix: String) -> String:
-	return "sga_%s_%s" % [source, suffix]
-
-
-func _sga_environment_key(source: String, suffix: String) -> String:
-	return "SGA_%s_%s" % [source.to_upper(), suffix.to_upper()]
-
-
-func _sga_credentials(source: String) -> Dictionary:
-	var settings := _read_json_dictionary(SETTINGS_PATH)
-	var api_token := OS.get_environment(_sga_environment_key(source, "api_token")).strip_edges()
-	var username := OS.get_environment(_sga_environment_key(source, "user")).strip_edges()
-	var password := OS.get_environment(_sga_environment_key(source, "password"))
-	var user_token := OS.get_environment(_sga_environment_key(source, "user_token")).strip_edges()
-	if api_token == "":
-		api_token = str(settings.get(_sga_setting_key(source, "api_token"), "")).strip_edges()
-	if username == "":
-		username = str(settings.get(_sga_setting_key(source, "user"), "")).strip_edges()
-	if password == "":
-		password = str(settings.get(_sga_setting_key(source, "password"), ""))
-	if user_token == "":
-		user_token = str(settings.get(_sga_setting_key(source, "user_token"), "")).strip_edges()
-	return {
-		"api_token": api_token,
-		"username": username,
-		"password": password,
-		"user_token": user_token,
-	}
-
-
-func _sga_source_configured(source: String) -> bool:
-	var credentials := _sga_credentials(source)
-	if str(credentials.get("user_token", "")).strip_edges() != "":
-		return true
-	return str(credentials.get("api_token", "")).strip_edges() != "" \
-		and str(credentials.get("username", "")).strip_edges() != "" \
-		and str(credentials.get("password", "")) != ""
-
-
-func _save_sga_user_token(source: String, token: String) -> void:
-	var clean_token := token.strip_edges()
-	if clean_token == "":
-		return
-	var settings := _read_json_dictionary(SETTINGS_PATH)
-	settings[_sga_setting_key(source, "user_token")] = clean_token
-	settings[_sga_setting_key(source, "user_token_saved_at")] = Time.get_datetime_string_from_system(false, true)
-	_write_json_dictionary(SETTINGS_PATH, settings)
-
-
-func _authenticate_sga_source(source: String) -> Dictionary:
-	var credentials := _sga_credentials(source)
-	var api_token := str(credentials.get("api_token", "")).strip_edges()
-	var username := str(credentials.get("username", "")).strip_edges()
-	var password := str(credentials.get("password", ""))
-	if api_token == "" or username == "" or password == "":
-		return {
-			"ok": false,
-			"state": "unconfigured",
-			"message": "Configure token API, usuario e senha do SGA %s." % _sga_source_label(source),
-		}
-	var token_issue := _sga_api_token_validation_message(api_token)
-	if token_issue != "":
-		return {"ok": false, "state": "invalid_config", "message": token_issue}
-
-	var response := await _http_post_json_with_headers(
-		"%s/usuario/autenticar" % SGA_API_BASE_URL,
-		{"usuario": username, "senha": password},
-		PackedStringArray([
-			"User-Agent: GrupoRSCentral/1.0",
-			"Accept: application/json",
-			"Content-Type: application/json",
-			"Authorization: Bearer %s" % api_token,
-		]),
-		SGA_AUTH_TIMEOUT_SECONDS
-	)
-	if not bool(response.get("ok", false)):
-		return {
-			"ok": false,
-			"state": "login",
-			"message": "SGA %s recusou a autenticacao: %s" % [_sga_source_label(source), str(response.get("message", ""))],
-		}
-
-	var parsed: Variant = JSON.parse_string(str(response.get("body", "")))
-	var api_error := _sga_api_error(parsed)
-	if not api_error.is_empty():
-		return {
-			"ok": false,
-			"state": "login",
-			"message": "SGA %s recusou as credenciais: %s" % [
-				_sga_source_label(source),
-				str(api_error.get("message", "usuario ou senha invalidos")),
-			],
-		}
-	var data := _sga_response_dictionary(parsed)
-	var user_token := str(data.get("token_usuario", data.get("token", ""))).strip_edges()
-	if user_token == "":
-		return {
-			"ok": false,
-			"state": "login",
-			"message": "SGA %s autenticou sem retornar token de usuario." % _sga_source_label(source),
-		}
-
-	_save_sga_user_token(source, user_token)
-	return {"ok": true, "token": user_token}
-
-
-func _ensure_sga_user_token(source: String, force: bool = false) -> Dictionary:
-	var credentials := _sga_credentials(source)
-	var saved_token := str(credentials.get("user_token", "")).strip_edges()
-	if not force and saved_token != "":
-		return {"ok": true, "token": saved_token, "source": "saved"}
-	return await _authenticate_sga_source(source)
-
-
-func _sga_response_dictionary(value: Variant) -> Dictionary:
-	if typeof(value) == TYPE_DICTIONARY:
-		var data := value as Dictionary
-		for key in ["data", "retorno", "resultado"]:
-			var nested: Variant = data.get(key, null)
-			if typeof(nested) == TYPE_DICTIONARY:
-				return nested as Dictionary
-			if typeof(nested) == TYPE_ARRAY and not (nested as Array).is_empty() and typeof((nested as Array)[0]) == TYPE_DICTIONARY:
-				return (nested as Array)[0] as Dictionary
-		return data
-	if typeof(value) == TYPE_ARRAY and not (value as Array).is_empty() and typeof((value as Array)[0]) == TYPE_DICTIONARY:
-		return (value as Array)[0] as Dictionary
-	return {}
-
-
-func _sga_api_error(value: Variant) -> Dictionary:
-	if typeof(value) != TYPE_DICTIONARY:
-		return {}
-	var raw_error: Variant = (value as Dictionary).get("error", null)
-	if typeof(raw_error) != TYPE_DICTIONARY:
-		return {}
-	var error := raw_error as Dictionary
-	var message := str(error.get("mensagem", error.get("message", ""))).strip_edges()
-	var code := int(float(error.get("codigo_erro", error.get("code", 0))))
-	if code == 0 and message == "":
-		return {}
-	return {
-		"code": code,
-		"message": message if message != "" else "erro %d" % code,
-	}
-
-
-func _sga_normalize_status(value: Variant) -> String:
-	var status := str(value).strip_edges()
-	if status == "" or status.to_lower() in ["null", "none", "n/a", "-"]:
-		return ""
-	return status.replace("_", " ").to_upper()
-
-
-func _sga_unique_statuses(values: Array[String]) -> Array[String]:
-	var result: Array[String] = []
-	var seen: Dictionary = {}
-	for value in values:
-		var normalized := _sga_normalize_status(value)
-		var key := _search_key(normalized)
-		if normalized == "" or seen.has(key):
-			continue
-		seen[key] = true
-		result.append(normalized)
-	return result
-
-
-func _sga_status_summary(result: Dictionary) -> String:
-	var statuses := _sga_unique_statuses([
-		str(result.get("associate_status", "")),
-		str(result.get("vehicle_status", "")),
-		str(result.get("financial_status", "")),
-	])
-	var labels: Array[String] = []
-	for status in statuses:
-		labels.append(status.to_lower().capitalize())
-	return " / ".join(labels)
-
-
-func _sga_result_state_from_body(body: String, response_code: int) -> String:
-	var key := _search_key(body)
-	if response_code == 404 \
-		or key.contains("encontrado") \
-		or key.contains("naoencontrado") \
-		or key.contains("n\u00e3oencontrado") \
-		or key.contains("naolocalizado") \
-		or key.contains("n\u00e3olocalizado") \
-		or key.contains("nenhumregistro") \
-		or key.contains("notfound"):
-		return "not_found"
-	if response_code == 401 or response_code == 403:
-		return "login"
-	return "error"
-
-
-func _sga_request_headers(user_token: String) -> PackedStringArray:
-	return PackedStringArray([
-		"User-Agent: GrupoRSCentral/1.0",
-		"Accept: application/json",
-		"Content-Type: application/json",
-		"Authorization: Bearer %s" % user_token,
-	])
-
-
-func _sga_http_get_text(url: String, headers: PackedStringArray, timeout_seconds: float = SGA_HTTP_TIMEOUT_SECONDS) -> Dictionary:
-	var request := HTTPRequest.new()
-	request.timeout = maxf(timeout_seconds, 1.0)
-	add_child(request)
-	var watchdog := Timer.new()
-	watchdog.one_shot = true
-	watchdog.wait_time = maxf(timeout_seconds + 1.0, 2.0)
-	add_child(watchdog)
-	var state := {
-		"done": false,
-		"result": HTTPRequest.RESULT_TIMEOUT,
-		"response_code": 0,
-		"headers": PackedStringArray(),
-		"body": PackedByteArray(),
-		"timed_out": false,
-	}
-	request.request_completed.connect(func(result: int, response_code: int, response_headers: PackedStringArray, body: PackedByteArray):
-		if bool(state.get("done", false)):
-			return
-		state["done"] = true
-		state["result"] = result
-		state["response_code"] = response_code
-		state["headers"] = response_headers
-		state["body"] = body
-	)
-	watchdog.timeout.connect(func():
-		if bool(state.get("done", false)):
-			return
-		state["done"] = true
-		state["timed_out"] = true
-		if is_instance_valid(request):
-			request.cancel_request()
-	)
-	var error := request.request(url, headers)
-	if error != OK:
-		watchdog.queue_free()
-		request.queue_free()
-		return {"ok": false, "message": "Falha ao iniciar consulta SGA.", "response_code": 0}
-	watchdog.start()
-	while not bool(state.get("done", false)):
-		await get_tree().process_frame
-	watchdog.stop()
-	watchdog.queue_free()
-	request.queue_free()
-	if bool(state.get("timed_out", false)):
-		return {"ok": false, "message": "Tempo limite da consulta SGA excedido.", "response_code": 0}
-	var result := int(state.get("result", HTTPRequest.RESULT_TIMEOUT))
-	var response_code := int(state.get("response_code", 0))
-	var response_body := state.get("body", PackedByteArray()) as PackedByteArray
-	var response_headers := state.get("headers", PackedStringArray()) as PackedStringArray
-	if result != HTTPRequest.RESULT_SUCCESS or response_code < 200 or response_code >= 300:
-		return {
-			"ok": false,
-			"message": _http_result_message(result, response_code),
-			"response_code": response_code,
-			"headers": response_headers,
-			"body": _decode_http_body_bytes(response_body),
-		}
-	return {
-		"ok": true,
-		"response_code": response_code,
-		"headers": response_headers,
-		"body": _decode_http_body_bytes(response_body),
-	}
-
-
-func _sga_http_post_json(url: String, value: Variant, headers: PackedStringArray, timeout_seconds: float = SGA_AUTH_TIMEOUT_SECONDS) -> Dictionary:
-	var request := HTTPRequest.new()
-	request.timeout = maxf(timeout_seconds, 1.0)
-	add_child(request)
-	var state := {
-		"done": false,
-		"result": HTTPRequest.RESULT_TIMEOUT,
-		"response_code": 0,
-		"headers": PackedStringArray(),
-		"body": PackedByteArray(),
-		"timed_out": false,
-	}
-	request.request_completed.connect(func(result: int, response_code: int, response_headers: PackedStringArray, body: PackedByteArray):
-		if bool(state.get("done", false)):
-			return
-		state["done"] = true
-		state["result"] = result
-		state["response_code"] = response_code
-		state["headers"] = response_headers
-		state["body"] = body
-	)
-	var error := request.request(url, headers, HTTPClient.METHOD_POST, JSON.stringify(value))
-	if error != OK:
-		request.queue_free()
-		return {"ok": false, "message": "Falha ao iniciar autenticacao SGA.", "response_code": 0}
-	var deadline := Time.get_ticks_msec() + int(maxf(timeout_seconds, 1.0) * 1000.0)
-	while not bool(state.get("done", false)) and Time.get_ticks_msec() < deadline:
-		await get_tree().process_frame
-	if not bool(state.get("done", false)):
-		if is_instance_valid(request):
-			request.cancel_request()
-		request.queue_free()
-		return {"ok": false, "message": "Tempo limite da autenticacao SGA excedido.", "response_code": 0}
-	request.queue_free()
-	var result := int(state.get("result", HTTPRequest.RESULT_TIMEOUT))
-	var response_code := int(state.get("response_code", 0))
-	var response_body := state.get("body", PackedByteArray()) as PackedByteArray
-	var response_headers := state.get("headers", PackedStringArray()) as PackedStringArray
-	if result != HTTPRequest.RESULT_SUCCESS or response_code < 200 or response_code >= 300:
-		return {
-			"ok": false,
-			"message": _http_result_message(result, response_code),
-			"response_code": response_code,
-			"headers": response_headers,
-			"body": _decode_http_body_bytes(response_body),
-		}
-	return {
-		"ok": true,
-		"response_code": response_code,
-		"headers": response_headers,
-		"body": _decode_http_body_bytes(response_body),
-	}
-
-
-func _lookup_sga_source_by_plate(plate: String, source: String) -> Dictionary:
-	var clean_plate := _normalize_location_plate(plate)
-	if clean_plate == "":
-		return {"ok": false, "state": "no_plate", "message": "Sem placa para consultar."}
-
-	var ensured := await _ensure_sga_user_token(source, false)
-	if not bool(ensured.get("ok", false)):
-		return {
-			"ok": false,
-			"state": str(ensured.get("state", "login")),
-			"message": str(ensured.get("message", "Acesso SGA nao configurado.")),
-		}
-
-	var user_token := str(ensured.get("token", "")).strip_edges()
-	var url := "%s/buscar/situacao-financeira-veiculo/%s" % [SGA_API_BASE_URL, clean_plate.uri_encode()]
-	var response := await _sga_http_get_text(url, _sga_request_headers(user_token))
-	var response_code := int(response.get("response_code", 0))
-	if not bool(response.get("ok", false)) and response_code in [401, 403]:
-		ensured = await _ensure_sga_user_token(source, true)
-		if bool(ensured.get("ok", false)):
-			user_token = str(ensured.get("token", "")).strip_edges()
-			response = await _sga_http_get_text(url, _sga_request_headers(user_token))
-			response_code = int(response.get("response_code", 0))
-
-	if not bool(response.get("ok", false)):
-		var failed_body := str(response.get("body", ""))
-		var failed_state := _sga_result_state_from_body(failed_body, response_code)
-		return {
-			"ok": false,
-			"state": failed_state,
-			"message": "SGA %s: %s" % [_sga_source_label(source), "cliente/placa nao localizado" if failed_state == "not_found" else str(response.get("message", "consulta indisponivel"))],
-		}
-
-	var parsed: Variant = JSON.parse_string(str(response.get("body", "")))
-	var financial_data := _sga_response_dictionary(parsed)
-	var vehicle_status := _sga_normalize_status(financial_data.get("descricao_situacao_veiculo", financial_data.get("situacao_veiculo", "")))
-	var financial_status := _sga_normalize_status(financial_data.get("situacao_financeira", financial_data.get("descricao_situacao_financeira", "")))
-	var cpf := _digits_only(str(financial_data.get("cpf", financial_data.get("cpf_associado", ""))))
-	var customer_name := str(financial_data.get("nome", financial_data.get("nome_associado", ""))).strip_edges()
-	if vehicle_status == "" and financial_status == "" and cpf == "":
-		var raw_message := str(financial_data.get("mensagem", financial_data.get("message", "")))
-		return {
-			"ok": false,
-			"state": "not_found" if _sga_result_state_from_body(raw_message, 200) == "not_found" else "error",
-			"message": "SGA %s nao retornou situacao para a placa %s." % [_sga_source_label(source), clean_plate],
-		}
-
-	# A resposta por placa ja traz a situacao do veiculo e a situacao
-	# financeira. Nao encadear uma segunda consulta de associado aqui: alem de
-	# ser redundante para o status exibido na tabela, ela podia transformar uma
-	# resposta imediata do SGA em varios segundos de "consultando...". A rota
-	# por CPF continua buscando o associado quando essa for a pesquisa pedida.
-	var result := {
-		"ok": true,
-		"state": "ok",
-		"source": source,
-		"plate": clean_plate,
-		"customer_name": customer_name,
-		"associate_status": "",
-		"vehicle_status": vehicle_status,
-		"financial_status": financial_status,
-	}
-	result["summary"] = _sga_status_summary(result)
-	result["message"] = "%s | %s" % [_sga_source_label(source), str(result.get("summary", "Situacao consultada"))]
-	return result
-
-
-func _lookup_sga_source_by_plate_guarded(plate: String, source: String) -> Dictionary:
-	# A API ja possui timeout por requisicao, mas uma consulta completa pode
-	# conter autenticacao, consulta do veiculo e consulta do associado. Este
-	# watchdog cobre a operacao inteira e impede que a linha fique presa em
-	# "consultando..." por uma falha de rede, sessao ou resposta inesperada.
-	var state := {"done": false, "result": {}}
-	call("_run_sga_source_by_plate_guarded", plate, source, state)
-	var deadline := Time.get_ticks_msec() + int(SGA_SOURCE_LOOKUP_DEADLINE_SECONDS * 1000.0)
-	while not bool(state.get("done", false)) and Time.get_ticks_msec() < deadline:
-		await get_tree().process_frame
-	if not bool(state.get("done", false)):
-		return {
-			"ok": false,
-			"state": "timeout",
-			"source": source,
-			"plate": _normalize_location_plate(plate),
-			"message": "SGA %s: tempo limite da consulta excedido." % _sga_source_label(source),
-		}
-	var result: Variant = state.get("result", {})
-	return result as Dictionary if typeof(result) == TYPE_DICTIONARY else {
-		"ok": false,
-		"state": "error",
-		"source": source,
-		"message": "SGA %s: resposta invalida." % _sga_source_label(source),
-	}
-
-
-func _run_sga_source_by_plate_guarded(plate: String, source: String, state: Dictionary) -> void:
-	var result := await _lookup_sga_source_by_plate(plate, source)
-	state["result"] = result
-	state["done"] = true
-
-
-func _lookup_sga_source_by_cpf(cpf: String, customer_name: String, source: String) -> Dictionary:
-	var clean_cpf := _digits_only(cpf)
-	if clean_cpf.length() not in [11, 14]:
-		return {"ok": false, "state": "cpf_invalid", "message": "CPF invalido para consultar o SGA."}
-
-	var ensured := await _ensure_sga_user_token(source, false)
-	if not bool(ensured.get("ok", false)):
-		return {
-			"ok": false,
-			"state": str(ensured.get("state", "login")),
-			"message": str(ensured.get("message", "Acesso SGA nao configurado.")),
-		}
-
-	var user_token := str(ensured.get("token", "")).strip_edges()
-	var url := "%s/buscar/situacao-associado/%s" % [SGA_API_BASE_URL, clean_cpf.uri_encode()]
-	var response := await _http_get_text_with_headers(url, _sga_request_headers(user_token))
-	var response_code := int(response.get("response_code", 0))
-	if not bool(response.get("ok", false)) and response_code in [401, 403]:
-		ensured = await _ensure_sga_user_token(source, true)
-		if bool(ensured.get("ok", false)):
-			user_token = str(ensured.get("token", "")).strip_edges()
-			response = await _http_get_text_with_headers(url, _sga_request_headers(user_token))
-			response_code = int(response.get("response_code", 0))
-
-	if not bool(response.get("ok", false)):
-		var failed_body := str(response.get("body", ""))
-		var failed_state := _sga_result_state_from_body(failed_body, response_code)
-		return {
-			"ok": false,
-			"state": failed_state,
-			"message": "SGA %s: %s" % [_sga_source_label(source), "cliente nao localizado" if failed_state == "not_found" else str(response.get("message", "consulta indisponivel"))],
-		}
-
-	var parsed: Variant = JSON.parse_string(str(response.get("body", "")))
-	var associate_data := _sga_response_dictionary(parsed)
-	var associate_status := _sga_normalize_status(associate_data.get(
-		"descricao",
-		associate_data.get("descricao_situacao", associate_data.get("situacao", associate_data.get("status", "")))
-	))
-	if associate_status == "":
-		var raw_message := str(associate_data.get("mensagem", associate_data.get("message", "")))
-		return {
-			"ok": false,
-			"state": "not_found" if _sga_result_state_from_body(raw_message, 200) == "not_found" else "error",
-			"message": "SGA %s nao retornou situacao para este cliente." % _sga_source_label(source),
-		}
-
-	var result := {
-		"ok": true,
-		"state": "ok",
-		"source": source,
-		"customer_name": customer_name.strip_edges(),
-		"associate_status": associate_status,
-		"vehicle_status": "",
-		"financial_status": "",
-	}
-	result["summary"] = _sga_status_summary(result)
-	result["message"] = "%s | %s" % [_sga_source_label(source), str(result.get("summary", "Situacao consultada"))]
-	return result
-
-
-func _lookup_sga_status_by_customer(customer_name: String) -> Dictionary:
-	var clean_name := customer_name.strip_edges()
-	var identity := await _fetch_grupo_rs_user_cpf(clean_name)
-	if not bool(identity.get("ok", false)):
-		var unavailable := {
-			"ok": false,
-			"state": str(identity.get("state", "cpf_not_found")),
-			"message": str(identity.get("message", "CPF nao localizado no Sistema RS.")),
-		}
-		return {
-			"client": clean_name,
-			"checked_at": int(Time.get_unix_time_from_system()),
-			SGA_SOURCE_RASTREIO: unavailable.duplicate(true),
-			SGA_SOURCE_PROTECAO: unavailable.duplicate(true),
-		}
-
-	var cpf := str(identity.get("cpf", ""))
-	var matched_name := str(identity.get("client", clean_name)).strip_edges()
-	# O fallback por CPF segue a mesma regra da consulta por placa: as duas
-	# fontes sao iniciadas antes do primeiro await e retornam separadamente.
-	var rastreio_task = call("_lookup_sga_source_by_cpf", cpf, matched_name, SGA_SOURCE_RASTREIO)
-	var protecao_task = call("_lookup_sga_source_by_cpf", cpf, matched_name, SGA_SOURCE_PROTECAO)
-	var rastreio: Dictionary = await rastreio_task
-	var protecao: Dictionary = await protecao_task
-	return {
-		"client": clean_name,
-		"checked_at": int(Time.get_unix_time_from_system()),
-		SGA_SOURCE_RASTREIO: rastreio,
-		SGA_SOURCE_PROTECAO: protecao,
-	}
-
-
-func _lookup_sga_status_for_product(product: Dictionary) -> Dictionary:
-	var client_name := str(product.get("client", "")).strip_edges()
-	var plate := str(product.get("plate", "")).strip_edges()
-	# O resultado da busca online ja possui a placa exata. Consultar por ela
-	# evita a rota lenta Portal -> Usuarios -> CPF e elimina o estado preso em
-	# "consultando..." quando o portal de usuarios demora ou recusa a leitura.
-	if plate != "":
-		var plate_progress := Callable(self, "_on_sga_status_source_progress").bind(_sga_product_cache_key(product))
-		var plate_result := await _lookup_sga_status_by_plate(plate, plate_progress)
-		plate_result["client"] = client_name
-		plate_result["plate"] = plate
-		plate_result["resolved_by"] = "plate"
-		return plate_result
-	var resolved_by := "client"
-	if client_name == "":
-		var resolved_client := await _fetch_grupo_rs_client_by_plate(plate)
-		if not bool(resolved_client.get("ok", false)):
-			var unavailable := {
-				"ok": false,
-				"state": str(resolved_client.get("state", "client_not_found")),
-				"message": str(resolved_client.get("message", "Associado nao localizado pela placa no Sistema RS.")),
-			}
-			return {
-				"client": "",
-				"plate": plate,
-				"checked_at": int(Time.get_unix_time_from_system()),
-				SGA_SOURCE_RASTREIO: unavailable.duplicate(true),
-				SGA_SOURCE_PROTECAO: unavailable.duplicate(true),
-			}
-		client_name = str(resolved_client.get("client", "")).strip_edges()
-		resolved_by = "plate"
-
-	var result := await _lookup_sga_status_by_customer(client_name)
-	result["client"] = client_name
-	result["plate"] = plate
-	result["resolved_by"] = resolved_by
-	return result
-
-
-func _lookup_sga_status_by_plate(plate: String, progress_callback: Callable = Callable()) -> Dictionary:
-	var state := {"done": false, "result": {}}
-	call("_run_sga_status_by_plate_guarded", plate, progress_callback, state)
-	var deadline := Time.get_ticks_msec() + int(SGA_LOOKUP_DEADLINE_SECONDS * 1000.0)
-	while not bool(state.get("done", false)) and Time.get_ticks_msec() < deadline:
-		await get_tree().process_frame
-	if not bool(state.get("done", false)):
-		var clean_plate := _normalize_location_plate(plate)
-		var timed_out := {
-			"ok": false,
-			"state": "timeout",
-			"plate": clean_plate,
-			"message": "Tempo limite da consulta SGA excedido.",
-		}
-		return {
-			"plate": clean_plate,
-			"checked_at": int(Time.get_unix_time_from_system()),
-			SGA_SOURCE_RASTREIO: timed_out.duplicate(true),
-			SGA_SOURCE_PROTECAO: timed_out.duplicate(true),
-		}
-	var result: Variant = state.get("result", {})
-	return result as Dictionary if typeof(result) == TYPE_DICTIONARY else {
-		"ok": false,
-		"state": "error",
-		"message": "Resposta invalida da consulta SGA.",
-	}
-
-
-func _run_sga_status_by_plate_guarded(plate: String, progress_callback: Callable, state: Dictionary) -> void:
-	var result := await _lookup_sga_status_by_plate_inner(plate, progress_callback)
-	state["result"] = result
-	state["done"] = true
-
-
-func _lookup_sga_status_by_plate_inner(plate: String, progress_callback: Callable = Callable()) -> Dictionary:
-	var clean_plate := _normalize_location_plate(plate)
-	# Dispara as duas consultas antes do primeiro await. Cada fonte possui seu
-	# proprio token e sua propria requisicao HTTP; assim a busca e realmente
-	# simultanea, mas cada resultado continua sendo tratado separadamente.
-	var rastreio_task = call("_lookup_sga_source_by_plate_guarded", clean_plate, SGA_SOURCE_RASTREIO)
-	var protecao_task = call("_lookup_sga_source_by_plate_guarded", clean_plate, SGA_SOURCE_PROTECAO)
-	var rastreio: Dictionary = await rastreio_task
-	if progress_callback.is_valid():
-		progress_callback.call(SGA_SOURCE_RASTREIO, rastreio)
-	var protecao: Dictionary = await protecao_task
-	if progress_callback.is_valid():
-		progress_callback.call(SGA_SOURCE_PROTECAO, protecao)
-	return {
-		"plate": clean_plate,
-		"checked_at": int(Time.get_unix_time_from_system()),
-		SGA_SOURCE_RASTREIO: rastreio,
-		SGA_SOURCE_PROTECAO: protecao,
-	}
-
-
-func _on_sga_status_source_progress(source: String, source_result: Dictionary, cache_key: String) -> void:
-	if cache_key == "":
-		return
-	var cached: Dictionary = sga_status_cache.get(cache_key, {}).duplicate(true)
-	if cached.is_empty():
-		return
-	cached[source] = source_result.duplicate(true)
-	sga_status_cache[cache_key] = cached
-	_refresh_sga_status_views()
-
-
-func _sga_client_key(client_name: String) -> String:
-	return _search_key(client_name)
-
-
-func _sga_product_cache_key(product: Dictionary) -> String:
-	var client_key := _sga_client_key(str(product.get("client", "")))
-	if client_key != "":
-		return client_key
-	var plate_key := _normalize_location_plate(str(product.get("plate", "")))
-	return "plate:%s" % plate_key if plate_key != "" else ""
-
-
-func _sga_status_cache_is_fresh(client_name: String) -> bool:
-	var client_key := _sga_client_key(client_name)
-	var cached: Dictionary = sga_status_cache.get(client_key, {})
-	var checked_at := int(cached.get("checked_at", 0))
-	return checked_at > 0 and int(Time.get_unix_time_from_system()) - checked_at < SGA_STATUS_CACHE_SECONDS
-
-
-func _sga_product_status_cache_is_fresh(product: Dictionary) -> bool:
-	var cache_key := _sga_product_cache_key(product)
-	var cached: Dictionary = sga_status_cache.get(cache_key, {})
-	var checked_at := int(cached.get("checked_at", 0))
-	return checked_at > 0 and int(Time.get_unix_time_from_system()) - checked_at < SGA_STATUS_CACHE_SECONDS
-
-
-func _schedule_sga_status_for_products(products: Array[Dictionary]) -> void:
-	if not _sga_search_is_active():
-		return
-	var search_plate := _normalize_location_plate(str(search_input.text if search_input else ""))
-	var lookup_by_plate := _is_valid_grupo_rs_vehicle_reassignment_plate(search_plate)
-	var scheduled := 0
-	for product in products:
-		if scheduled >= SGA_MAX_LOOKUPS_PER_SEARCH:
-			break
-		var client_name := str(product.get("client", "")).strip_edges()
-		var cache_key := _sga_product_cache_key(product)
-		if cache_key == "" or bool(sga_status_busy.get(cache_key, false)) or _sga_product_status_cache_is_fresh(product):
-			continue
-		var queued_product := product.duplicate(true)
-		queued_product["sga_lookup_by_plate"] = lookup_by_plate
-		sga_status_busy[cache_key] = true
-		sga_status_cache[cache_key] = {
-			"client": client_name,
-			"plate": str(product.get("plate", "")).strip_edges(),
-			"checked_at": 0,
-			SGA_SOURCE_RASTREIO: {"state": "loading"},
-			SGA_SOURCE_PROTECAO: {"state": "loading"},
-		}
-		sga_status_queue.append(queued_product)
-		scheduled += 1
-	if scheduled > 0:
-		call_deferred("_refresh_sga_status_views")
-		call_deferred("_pump_sga_status_queue")
-
-
-func _sga_search_is_active() -> bool:
-	return search_input != null and is_instance_valid(search_input) and search_input.text.strip_edges().length() >= 3
-
-
-func _pump_sga_status_queue() -> void:
-	while sga_status_running < SGA_VISIBLE_AUTO_CONCURRENCY and not sga_status_queue.is_empty():
-		var product: Dictionary = sga_status_queue.pop_front()
-		sga_status_running += 1
-		_run_sga_status_lookup(product)
-
-
-func _run_sga_status_lookup(product: Dictionary) -> void:
-	var cache_key := _sga_product_cache_key(product)
-	var result := await _lookup_sga_status_for_product(product)
-	sga_status_cache[cache_key] = result
-	var resolved_client_key := _sga_client_key(str(result.get("client", "")))
-	if resolved_client_key != "":
-		sga_status_cache[resolved_client_key] = result
-	sga_status_busy.erase(cache_key)
-	sga_status_running = maxi(sga_status_running - 1, 0)
-	_refresh_sga_status_views()
-	_pump_sga_status_queue()
-
-
-func _refresh_sga_status_views() -> void:
-	if table_body != null and is_instance_valid(table_body):
-		_refresh_table()
-	if online_lookup_body != null and is_instance_valid(online_lookup_body) and not online_lookup_current_rows.is_empty():
-		_render_online_lookup_rows(online_lookup_current_rows)
-
-
-func _sga_result_color(result: Dictionary) -> Color:
-	var state := str(result.get("state", "idle"))
-	if state == "loading":
-		return BLUE
-	if state == "unconfigured" or state == "login":
-		return YELLOW
-	if state == "invalid_config":
-		return RED
-	if state != "ok":
-		return Color("#7a8794")
-	var key := _search_key(_sga_status_summary(result))
-	for fragment in ["inadimpl", "cancel", "inativ", "bloque", "suspens"]:
-		if key.contains(fragment):
-			return RED
-	for fragment in ["pendente", "atras", "analise"]:
-		if key.contains(fragment):
-			return YELLOW
-	return GREEN
-
-
-func _sga_result_text(source: String, result: Dictionary) -> String:
-	var prefix := _sga_source_label(source)
-	match str(result.get("state", "idle")):
-		"loading":
-			return "%s: consultando..." % prefix
-		"unconfigured":
-			return "%s: nao configurado" % prefix
-		"login":
-			return "%s: verificar acesso" % prefix
-		"invalid_config":
-			return "%s: corrigir token" % prefix
-		"not_found":
-			return "%s: nao localizado" % prefix
-		"error":
-			return "%s: indisponivel" % prefix
-		"timeout":
-			return "%s: tempo excedido" % prefix
-		"no_client":
-			return "%s: sem cliente" % prefix
-		"cpf_unavailable":
-			return "%s: fora de Imperatriz" % prefix
-		"cpf_not_found":
-			return "%s: CPF nao localizado" % prefix
-		"client_not_found":
-			return "%s: associado nao localizado" % prefix
-		"cpf_invalid":
-			return "%s: CPF invalido" % prefix
-		"rs_error":
-			return "%s: Sistema RS indisponivel" % prefix
-		"no_plate":
-			return "%s: sem placa" % prefix
-		"ok":
-			var summary := _sga_status_summary(result)
-			return "%s: %s" % [prefix, summary if summary != "" else "sem situacao"]
-		_:
-			return "%s: aguardando pesquisa" % prefix
-
-
-func _make_sga_source_badge(source: String, result: Dictionary, width: float) -> Control:
-	var color := _sga_result_color(result)
-	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(width, 28)
-	panel.add_theme_stylebox_override("panel", _style_box(color.lightened(0.84), color.lightened(0.18), 1, 7))
-	panel.tooltip_text = str(result.get("message", _sga_result_text(source, result)))
-
-	var label := Label.new()
-	label.text = _sga_result_text(source, result)
-	label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	label.add_theme_font_override("font", UI_FONT)
-	label.add_theme_font_size_override("font_size", 13)
-	label.add_theme_color_override("font_color", color.darkened(0.28))
-	panel.add_child(label)
-	return panel
-
-
-func _sga_result_for_product_source(product: Dictionary, source: String) -> Dictionary:
-	var cache_key := _sga_product_cache_key(product)
-	var cached: Dictionary = sga_status_cache.get(cache_key, {})
-	var result: Dictionary = cached.get(source, {})
-	if cache_key == "":
-		return {"state": "no_client", "message": "Informe o cliente ou a placa para consultar o SGA."}
-	if result.is_empty():
-		return {"state": "idle", "message": "A pesquisa localiza o associado pela placa, busca o CPF em Usuarios e consulta o SGA."}
-	return result
-
-
-func _make_sga_status_cell(product: Dictionary, width: float = 292.0) -> Control:
-	var wrap := VBoxContainer.new()
-	wrap.custom_minimum_size = Vector2(width, 0)
-	wrap.add_theme_constant_override("separation", 3)
-	for source in [SGA_SOURCE_RASTREIO, SGA_SOURCE_PROTECAO]:
-		var result := _sga_result_for_product_source(product, source)
-		wrap.add_child(_make_sga_source_badge(source, result, width))
-	return wrap
-
-
-func _make_sga_status_strip(product: Dictionary) -> Control:
-	var strip := HBoxContainer.new()
-	strip.custom_minimum_size = Vector2(0, 32)
-	strip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	strip.add_theme_constant_override("separation", 8)
-
-	var title := Label.new()
-	title.text = "Situacao SGA"
-	title.custom_minimum_size = Vector2(140, 28)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	title.add_theme_font_override("font", UI_FONT)
-	title.add_theme_font_size_override("font_size", 13)
-	title.add_theme_color_override("font_color", MUTED)
-	strip.add_child(title)
-
-	for source in [SGA_SOURCE_RASTREIO, SGA_SOURCE_PROTECAO]:
-		var result := _sga_result_for_product_source(product, source)
-		strip.add_child(_make_sga_source_badge(source, result, 300.0))
-
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	strip.add_child(spacer)
-	return strip
-
-
 func _show_maintenance_register() -> void:
 	if selected_branch_id != "imperatriz":
 		_show_warning("Aviso", "Manutencoes disponivel apenas para Imperatriz.")
@@ -33918,6 +32871,7 @@ func _build_maintenance_register_view() -> Control:
 	stack.add_child(maintenance_result_label)
 
 	return root
+
 
 
 func _build_maintenance_schedule_view() -> Control:
@@ -35160,7 +34114,7 @@ func _system_log_transport_label(entry: Dictionary) -> String:
 	match transport:
 		"api": return "API principal"
 		"web": return "Portal web (fallback)"
-		"firebase": return "Firebase"
+		"local_database": return "Banco local SQL"
 		_: return "Sistema local"
 
 
@@ -35423,7 +34377,7 @@ func _make_modern_form_summary(sku: String) -> Control:
 	form_summary_label.add_theme_color_override("font_color", Color("#e8f1f8"))
 	stack.add_child(form_summary_label)
 	var hint := Label.new()
-	hint.text = "A placa informada sera vinculada ao RS300 apos confirmacao da API.\nSem placa, o aparelho permanece no estoque." if form_mode == "new" else "Placa, chip, telefone e APN podem ser atualizados neste fluxo.\nA alteracao remota so termina apos confirmacao da API."
+	hint.text = "A API sera consultada para completar os dados. Ao confirmar, todos os campos serao salvos no Banco local SQL." if form_mode == "new" else "Os dados consultados e preenchidos serao salvos no Banco local SQL."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.add_theme_font_override("font", UI_FONT)
 	hint.add_theme_font_size_override("font_size", 13)
@@ -35453,18 +34407,11 @@ func _make_modern_form_summary(sku: String) -> Control:
 	)
 	local_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	actions.add_child(local_button)
-	form_grupo_rs_reassign_button = _make_action_button(
-		"Modificar",
-		ORANGE,
-		ORANGE,
-		Color.WHITE,
-		Vector2(0, 44),
-		_request_modify_grupo_rs_equipment
-	)
-	form_grupo_rs_reassign_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	form_grupo_rs_reassign_button.disabled = form_mode == "new"
-	form_grupo_rs_reassign_button.tooltip_text = "Use Modificar somente para um equipamento ja consultado no Grupo RS." if form_mode == "new" else "Confirme a placa, chip, telefone e APN pela API oficial."
-	actions.add_child(form_grupo_rs_reassign_button)
+	if form_mode != "new":
+		form_grupo_rs_reassign_button = _make_action_button("Modificar", ORANGE, ORANGE, Color.WHITE, Vector2(0, 44), _request_modify_grupo_rs_equipment)
+		form_grupo_rs_reassign_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		form_grupo_rs_reassign_button.tooltip_text = "Confirme os dados antes de salvar no Banco local SQL."
+		actions.add_child(form_grupo_rs_reassign_button)
 	var cancel_button := _make_action_button("Voltar", SOFT_BG, BORDER, BLUE_DARK, Vector2(0, 42), _show_list)
 	cancel_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	actions.add_child(cancel_button)
@@ -35492,7 +34439,7 @@ func _update_form_summary() -> void:
 	var associated := form_associate_vehicle_toggle != null and form_associate_vehicle_toggle.button_pressed
 	form_summary_label.text = "Serie: %s\nAPN: %s\nOperadora: %s\nStatus local: %s\n\n" % [serial if serial != "" else "Aguardando", apn if apn != "" else "A definir", operator_name if operator_name != "" else "A definir", status if status != "" else "Estoque"]
 	form_summary_label.text += ("Vinculo: %s\nPlaca: %s" % ["Novo vinculo" if form_mode == "new" else "Reentrada", plate if associated and plate != "" else "Sem veiculo associado"])
-	# O vinculo remoto e o espelho Firebase sao estados independentes: um
+	# O vinculo remoto e o espelho Banco local SQL sao estados independentes: um
 	# aparelho antigo pode existir no Grupo RS e ainda ser um novo registro local.
 	# Exiba ambos para evitar que "Novo vinculo" seja interpretado como novo
 	# cadastro remoto.
@@ -35501,7 +34448,7 @@ func _update_form_summary() -> void:
 		if remote_plate != "":
 			form_summary_label.text += "\nVinculo remoto: existente (%s)" % remote_plate
 		var local_record := store.get_product(serial) if store != null else {}
-		form_summary_label.text += "\nRegistro Firebase: %s" % ("existente" if not local_record.is_empty() else "novo")
+		form_summary_label.text += "\nRegistro Banco local SQL: %s" % ("existente" if not local_record.is_empty() else "novo")
 	if form_summary_status_label != null and is_instance_valid(form_summary_status_label):
 		form_summary_status_label.text = "Pronto para revisar" if serial != "" else "Aguardando IMEI"
 
@@ -35687,8 +34634,9 @@ func _build_table_header() -> Control:
 		select_header.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		row.add_child(select_header)
 
-	row.add_child(_make_table_label("Série  ↕", 150, false, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 13))
-	row.add_child(_make_table_label("Placa  ↕", 145, false, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 13))
+	row.add_child(_make_table_label("Série  ↕", 220, false, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 13))
+	row.add_child(_make_table_label("Identificação", 140, false, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 12))
+	row.add_child(_make_table_label("Veículo", 145, false, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 12))
 	row.add_child(_make_table_label("Tipo", 140, false, MUTED, HORIZONTAL_ALIGNMENT_CENTER, 15))
 	row.add_child(_make_table_label("Operadora  ↕", 120, false, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 13))
 	row.add_child(_make_table_label("Status  ↕", 120, false, MUTED, HORIZONTAL_ALIGNMENT_LEFT, 13))
@@ -36179,35 +35127,61 @@ func _filtered_products() -> Array[Dictionary]:
 			var score_a := _search_relevance(a, query)
 			var score_b := _search_relevance(b, query)
 			if score_a == score_b:
-				return str(a.get("updated_at", "")) > str(b.get("updated_at", ""))
+				return _inventory_installation_is_newer(a, b)
 			return score_a > score_b
 		)
 		return result
 
-	result.sort_custom(func(a, b):
-		var priority := {
-			"estoque": 0,
-			"instalado": 1,
-			"parado": 2
-		} if _is_regional_branch() else {
-			"estoque": 0,
-			"reserva": 1,
-			"instalado": 2
-		}
-
-		var status_a := _status_key_for_selected_branch(a)
-		var status_b := _status_key_for_selected_branch(b)
-		var pa = priority.get(status_a, 99)
-		var pb = priority.get(status_b, 99)
-		if pa == pb and status_a == "instalado":
-			return str(a.get("installed_at", a.get("discharged_at", ""))) > str(b.get("installed_at", b.get("discharged_at", "")))
-		if pa == pb:
-			return str(a.get("updated_at", "")) > str(b.get("updated_at", ""))
-
-		return pa < pb
-	)
+	result.sort_custom(_inventory_installation_is_newer)
 
 	return result
+
+
+func _inventory_installation_sort_key(product: Dictionary) -> String:
+	var raw := str(product.get("installed_at", "")).strip_edges()
+	if raw == "":
+		raw = str(product.get("discharged_at", "")).strip_edges()
+	var normalized_text := _search_key(raw)
+	if raw == "" or normalized_text in ["naoinformada", "naoinformado", "semdata", "null"]:
+		return ""
+	var date_key := _log_input_date(raw)
+	if date_key == "":
+		return ""
+	# A data canonica garante a ordem anual/mensal; os ultimos seis digitos
+	# preservam hora, minuto e segundo quando estiverem presentes.
+	var raw_digits := _digits_only(raw)
+	var time_key := raw_digits.substr(maxi(raw_digits.length() - 6, 0)) if raw_digits.length() > 8 else "000000"
+	return "%sT%s" % [date_key, time_key.pad_zeros(6)]
+
+
+func _inventory_installation_is_newer(a: Dictionary, b: Dictionary) -> bool:
+	var date_a := _inventory_installation_sort_key(a)
+	var date_b := _inventory_installation_sort_key(b)
+	if date_a == "" and date_b != "":
+		return false
+	if date_a != "" and date_b == "":
+		return true
+	if date_a != date_b:
+		return date_a > date_b
+	var serial_a := _search_key(str(a.get("imei", a.get("sku", ""))))
+	var serial_b := _search_key(str(b.get("imei", b.get("sku", ""))))
+	return serial_a < serial_b
+
+
+func _regional_plate_sort_key(product: Dictionary) -> String:
+	var plate := str(product.get("plate", product.get("placa", ""))).strip_edges().to_upper()
+	if plate == "":
+		return "ZZZZZZZZ"
+	var compact := plate.replace("-", "").replace(" ", "")
+	var suffix := ""
+	for index in range(compact.length() - 1, -1, -1):
+		var character := compact.substr(index, 1)
+		if character >= "0" and character <= "9":
+			suffix = character + suffix
+		else:
+			break
+	var prefix := compact.substr(0, maxi(compact.length() - suffix.length(), 0))
+	return "%s%08d%s" % [prefix, int(suffix) if suffix != "" else 99999999, compact]
 
 
 func _search_relevance(product: Dictionary, query: String) -> int:
@@ -36219,6 +35193,8 @@ func _search_relevance(product: Dictionary, query: String) -> int:
 	var serial := _search_key(str(product.get("imei", product.get("sku", ""))))
 	var sku := _search_key(str(product.get("sku", "")))
 	var plate := _search_key(str(product.get("plate", "")))
+	var identification_plate := _search_key(str(product.get("identification_plate", "")))
+	var vehicle_plate := _search_key(str(product.get("vehicle_plate", "")))
 	var chip := _search_key(str(product.get("chip_number", "")))
 	var model := _search_key(str(product.get("model", product.get("category", ""))))
 	var operator_name := _search_key(str(product.get("operator", "")))
@@ -36226,15 +35202,15 @@ func _search_relevance(product: Dictionary, query: String) -> int:
 	var status := _search_key(str(product.get("tracker_status", product.get("status", ""))))
 	var name := _search_key(str(product.get("name", "")))
 
-	if q == serial or q == sku or q == plate or (q_no_zero != "" and (_trim_leading_zeroes_text(serial) == q_no_zero or _trim_leading_zeroes_text(sku) == q_no_zero)):
+	if q == serial or q == sku or q == plate or q == identification_plate or q == vehicle_plate or (q_no_zero != "" and (_trim_leading_zeroes_text(serial) == q_no_zero or _trim_leading_zeroes_text(sku) == q_no_zero)):
 		return 1000
 	if q == chip:
 		return 940
-	if serial.begins_with(q) or sku.begins_with(q) or plate.begins_with(q):
+	if serial.begins_with(q) or sku.begins_with(q) or plate.begins_with(q) or identification_plate.begins_with(q) or vehicle_plate.begins_with(q):
 		return 860
 	if q_no_zero != "" and (_trim_leading_zeroes_text(serial).begins_with(q_no_zero) or _trim_leading_zeroes_text(sku).begins_with(q_no_zero)):
 		return 820
-	if plate.contains(q) or serial.contains(q) or sku.contains(q):
+	if plate.contains(q) or identification_plate.contains(q) or vehicle_plate.contains(q) or serial.contains(q) or sku.contains(q):
 		return 760
 	if operator_name == q or model == q or status == q:
 		return 700
@@ -36299,10 +35275,37 @@ func _is_exact_search_match(product: Dictionary) -> bool:
 	var serial := _search_key(str(product.get("imei", product.get("sku", ""))))
 	var sku := _search_key(str(product.get("sku", "")))
 	var plate := _search_key(str(product.get("plate", "")))
+	var identification_plate := _search_key(str(product.get("identification_plate", "")))
+	var vehicle_plate := _search_key(str(product.get("vehicle_plate", "")))
 	return q == serial \
 		or q == sku \
 		or q == plate \
+		or q == identification_plate \
+		or q == vehicle_plate \
 		or (q_no_zero != "" and (_trim_leading_zeroes_text(serial) == q_no_zero or _trim_leading_zeroes_text(sku) == q_no_zero))
+
+
+func _identification_plate(product: Dictionary) -> String:
+	return str(product.get("identification_plate", "")).strip_edges().to_upper()
+
+
+func _vehicle_plate(product: Dictionary) -> String:
+	var value := str(product.get("vehicle_plate", "")).strip_edges().to_upper()
+	if value == "" and _status_key(product) == "instalado":
+		value = str(product.get("plate", "")).strip_edges().to_upper()
+	return value
+
+
+func _plate_relationship_display(product: Dictionary) -> String:
+	var identification := _identification_plate(product)
+	var vehicle := _vehicle_plate(product)
+	if identification != "" and vehicle != "" and identification != vehicle:
+		return "%s → %s" % [identification, vehicle]
+	if vehicle != "":
+		return vehicle
+	if identification != "":
+		return identification
+	return str(product.get("plate", "")).strip_edges().to_upper()
 
 
 func _make_serial_location_cell(product: Dictionary, sku: String) -> Control:
@@ -36314,7 +35317,7 @@ func _make_serial_location_cell(product: Dictionary, sku: String) -> Control:
 	var location_label := str(communication_status.get("label", location_status.get("label", "Consultar localizacao")))
 
 	var row := HBoxContainer.new()
-	row.custom_minimum_size = Vector2(150, 0)
+	row.custom_minimum_size = Vector2(220, 0)
 	row.add_theme_constant_override("separation", 4)
 
 	var map_button := _make_action_button(
@@ -36336,19 +35339,19 @@ func _make_serial_location_cell(product: Dictionary, sku: String) -> Control:
 	row.add_child(map_button)
 
 	var serial_stack := VBoxContainer.new()
-	serial_stack.custom_minimum_size = Vector2(100, 0)
+	serial_stack.custom_minimum_size = Vector2(170, 0)
 	serial_stack.alignment = BoxContainer.ALIGNMENT_CENTER
 	serial_stack.add_theme_constant_override("separation", 0)
 
 	var serial_cell := _make_copyable_table_cell(
 		serial,
-		100,
+		170,
 		false,
 		Color.BLACK,
 		HORIZONTAL_ALIGNMENT_CENTER,
 		17
 	)
-	serial_cell.custom_minimum_size = Vector2(100, 28)
+	serial_cell.custom_minimum_size = Vector2(170, 28)
 	serial_stack.add_child(serial_cell)
 
 	var status_hint := Label.new()
@@ -36399,6 +35402,10 @@ func _location_status_short_label(label: String) -> String:
 	match clean:
 		"Consultar localizacao":
 			return "Verificar"
+		"Não consultado":
+			return "Não consultado"
+		"Nao consultado":
+			return "Não consultado"
 		"Consultando":
 			return "..."
 		"Aguardando API":
@@ -36447,29 +35454,33 @@ func _make_table_row(product: Dictionary) -> Control:
 		row.add_child(
 			_make_copyable_table_cell(
 				_blank(str(product.get("imei", sku))),
-				150,
+				220,
 				false,
 				Color.BLACK,
 				HORIZONTAL_ALIGNMENT_CENTER,
 				17
 			)
 		)
-		var regional_plate_wrap := CenterContainer.new()
-		regional_plate_wrap.custom_minimum_size = Vector2(145, 0)
-		row.add_child(regional_plate_wrap)
-
-		var regional_plate_input := LineEdit.new()
-		regional_plate_input.placeholder_text = "Placa"
-		regional_plate_input.text = str(table_plate_drafts.get(sku, product.get("plate", "")))
-		regional_plate_input.custom_minimum_size = Vector2(145, 38)
-		regional_plate_input.alignment = HORIZONTAL_ALIGNMENT_CENTER
-		_style_line_edit(regional_plate_input)
-		regional_plate_input.text_changed.connect(_format_plate_input.bind(regional_plate_input))
-		regional_plate_input.text_changed.connect(func(_value: String):
-			table_plate_drafts[sku] = regional_plate_input.text
-		)
-		regional_plate_wrap.add_child(regional_plate_input)
-		row_panel.set_meta("plate_input", regional_plate_input)
+		row.add_child(_make_copyable_table_cell(_blank(_identification_plate(product)), 140, false, Color.BLACK, HORIZONTAL_ALIGNMENT_LEFT, 17))
+		var regional_plate_input: LineEdit = null
+		if installed:
+			row.add_child(_make_copyable_table_cell(_blank(_vehicle_plate(product)), 145, false, Color.BLACK, HORIZONTAL_ALIGNMENT_LEFT, 17))
+		else:
+			var regional_plate_wrap := CenterContainer.new()
+			regional_plate_wrap.custom_minimum_size = Vector2(145, 0)
+			row.add_child(regional_plate_wrap)
+			regional_plate_input = LineEdit.new()
+			regional_plate_input.placeholder_text = "Placa veículo"
+			regional_plate_input.text = str(table_plate_drafts.get(sku, ""))
+			regional_plate_input.custom_minimum_size = Vector2(138, 38)
+			regional_plate_input.alignment = HORIZONTAL_ALIGNMENT_CENTER
+			_style_line_edit(regional_plate_input)
+			regional_plate_input.text_changed.connect(_format_plate_input.bind(regional_plate_input))
+			regional_plate_input.text_changed.connect(func(_value: String):
+				table_plate_drafts[sku] = regional_plate_input.text
+			)
+			regional_plate_wrap.add_child(regional_plate_input)
+			row_panel.set_meta("plate_input", regional_plate_input)
 		row.add_child(
 			_make_copyable_table_cell(
 				_blank(str(product.get("model", product.get("category", "")))),
@@ -36534,17 +35545,27 @@ func _make_table_row(product: Dictionary) -> Control:
 		return row_panel
 
 	row.add_child(_make_serial_location_cell(product, sku))
+	row.add_child(
+		_make_copyable_table_cell(
+			_blank(_identification_plate(product)),
+			140,
+			false,
+			Color.BLACK,
+			HORIZONTAL_ALIGNMENT_LEFT,
+			17
+		)
+	)
 
 	var plate_input: LineEdit = null
 	if installed:
 		row.add_child(
 			_make_copyable_table_cell(
-				_blank(str(product.get("plate", ""))),
+				_blank(_vehicle_plate(product)),
 				145,
 				false,
 				Color.BLACK,
 				HORIZONTAL_ALIGNMENT_LEFT,
-				15
+				17
 			)
 		)
 	else:
@@ -36552,9 +35573,9 @@ func _make_table_row(product: Dictionary) -> Control:
 		plate_wrap.custom_minimum_size = Vector2(145, 0)
 		row.add_child(plate_wrap)
 		plate_input = LineEdit.new()
-		plate_input.placeholder_text = "Placa"
-		plate_input.text = str(table_plate_drafts.get(sku, product.get("plate", "")))
-		plate_input.custom_minimum_size = Vector2(135, 34)
+		plate_input.placeholder_text = "Placa veículo"
+		plate_input.text = str(table_plate_drafts.get(sku, ""))
+		plate_input.custom_minimum_size = Vector2(138, 34)
 		plate_input.alignment = HORIZONTAL_ALIGNMENT_LEFT
 		_style_line_edit(plate_input)
 		plate_input.text_changed.connect(_format_plate_input.bind(plate_input))
@@ -36681,7 +35702,7 @@ func _make_table_row(product: Dictionary) -> Control:
 
 		actions.add_child(btn_estoque)
 
-	if _sga_search_is_active():
+	if SGA_ENABLED and _sga_search_is_active():
 		row_stack.add_child(_make_sga_status_strip(product))
 
 	return row_panel
@@ -37572,15 +36593,16 @@ func _request_linksolutions_login_once() -> Dictionary:
 
 
 func _linksolutions_credentials() -> Dictionary:
-	var env_user := OS.get_environment("LINKSOLUTIONS_EMAIL").strip_edges()
-	var env_password := OS.get_environment("LINKSOLUTIONS_PASSWORD")
-	if env_user != "" and env_password != "":
-		return {"username": env_user, "password": env_password}
-
 	var settings := _read_json_dictionary(SETTINGS_PATH)
+	var username := str(settings.get("linksolutions_email", "")).strip_edges()
+	var password := str(settings.get("linksolutions_password", ""))
+	if username == "":
+		username = OS.get_environment("LINKSOLUTIONS_EMAIL").strip_edges()
+	if password == "":
+		password = OS.get_environment("LINKSOLUTIONS_PASSWORD")
 	return {
-		"username": str(settings.get("linksolutions_email", "")).strip_edges(),
-		"password": str(settings.get("linksolutions_password", "")),
+		"username": username,
+		"password": password,
 	}
 
 
@@ -37602,11 +36624,9 @@ func _linksolutions_json_request_headers() -> PackedStringArray:
 
 
 func _linksolutions_token() -> String:
-	var env_token := OS.get_environment("LINKSOLUTIONS_JWT_TOKEN").strip_edges()
-	if env_token != "":
-		return env_token
 	var settings := _read_json_dictionary(SETTINGS_PATH)
-	return str(settings.get("linksolutions_token", "")).strip_edges()
+	var token := str(settings.get("linksolutions_token", "")).strip_edges()
+	return token if token != "" else OS.get_environment("LINKSOLUTIONS_JWT_TOKEN").strip_edges()
 
 
 func _save_linksolutions_token(token: String) -> void:
@@ -38205,18 +37225,40 @@ func _install_equipment(sku: String, plate_input: LineEdit) -> void:
 		_show_warning("Aviso", "Informe a placa antes de dar baixa no aparelho.")
 		return
 
+	var product := store.get_product(sku) if store != null else {}
+	var identification := _identification_plate(product)
+	var confirmation := "Deseja realmente instalar este equipamento no veiculo %s?" % plate.to_upper()
+	if identification != "":
+		confirmation = "A identificacao %s sera instalada no veiculo %s. Confirmar a baixa?" % [identification, plate.to_upper()]
 	_confirm_action(
 		"Dar baixa",
-		"Deseja realmente dar baixa neste equipamento?",
+		confirmation,
 		func():
-			if not store.install_tracker(sku, plate):
-				_show_error("Erro", "Nao foi possivel dar baixa no aparelho.")
-			else:
-				table_plate_drafts.erase(sku)
-				_log_system_action("Dar baixa", "Instalado na placa %s" % plate.to_upper(), sku)
-				_refresh_table()
-				_show_success("Sucesso", "Aparelho instalado com sucesso!")
+			await _install_equipment_confirmed(sku, plate)
 	)
+
+
+func _install_equipment_confirmed(sku: String, plate: String) -> Dictionary:
+	if store == null or not store.install_tracker(sku, plate):
+		_show_error("Erro", "Nao foi possivel dar baixa no aparelho.")
+		return {"ok": false, "stage": "store"}
+	var product := store.get_product(sku)
+	if product.is_empty():
+		_show_error("Erro", "A baixa foi preservada localmente, mas o registro nao foi reencontrado para confirmar o Banco local SQL.")
+		return {"ok": false, "stage": "store_lookup"}
+	var local_database_result := await _ensure_local_database_modification_saved(sku, product)
+	if not bool(local_database_result.get("ok", false)):
+		_show_error("Baixa pendente", "A baixa foi preservada localmente, mas o Banco local SQL nao confirmou a gravacao. A operacao ficou pendente e nao sera apresentada como concluida.")
+		return {"ok": false, "stage": "local_database", "local_database_pending": true, "local_database": local_database_result}
+	table_plate_drafts.erase(sku)
+	var identification := _identification_plate(product)
+	var details := "Instalado no veiculo %s" % _vehicle_plate(product)
+	if identification != "":
+		details = "Identificacao %s instalada no veiculo %s" % [identification, _vehicle_plate(product)]
+	_log_system_action("Dar baixa", details, sku)
+	_refresh_table()
+	_show_success("Sucesso", "Aparelho instalado com sucesso!")
+	return {"ok": true, "stage": "confirmed", "local_database": local_database_result}
 
 
 
@@ -38225,13 +37267,26 @@ func _send_to_stock(sku: String) -> void:
 		"Voltar para estoque",
 		"Deseja realmente devolver este equipamento para o estoque?",
 		func():
-			if not store.set_tracker_status(sku, "Estoque"):
-				_show_error("Erro", "Nao foi possivel enviar o aparelho para estoque.")
-				return
-			_log_system_action("Voltou para estoque", "Status alterado para Estoque", sku)
-			_refresh_table()
-			_show_success("Sucesso", "Aparelho voltou para o estoque.")
+			await _send_to_stock_confirmed(sku)
 	)
+
+
+func _send_to_stock_confirmed(sku: String) -> Dictionary:
+	if store == null or not store.set_tracker_status(sku, "Estoque"):
+		_show_error("Erro", "Nao foi possivel enviar o aparelho para estoque.")
+		return {"ok": false, "stage": "store"}
+	var product := store.get_product(sku)
+	if product.is_empty():
+		_show_error("Erro", "A devolucao foi preservada localmente, mas o registro nao foi reencontrado para confirmar o Banco local SQL.")
+		return {"ok": false, "stage": "store_lookup"}
+	var local_database_result := await _ensure_local_database_modification_saved(sku, product)
+	if not bool(local_database_result.get("ok", false)):
+		_show_error("Devolucao pendente", "A devolucao foi preservada localmente, mas o Banco local SQL nao confirmou a gravacao. A operacao ficou pendente e nao sera apresentada como concluida.")
+		return {"ok": false, "stage": "local_database", "local_database_pending": true, "local_database": local_database_result}
+	_log_system_action("Voltou para estoque", "Status alterado para Estoque", sku)
+	_refresh_table()
+	_show_success("Sucesso", "Aparelho voltou para o estoque.")
+	return {"ok": true, "stage": "confirmed", "local_database": local_database_result}
 
 
 func _show_product_history(sku: String) -> void:
@@ -38245,7 +37300,8 @@ func _show_product_history(sku: String) -> void:
 	var lines: Array[String] = []
 	if not product.is_empty():
 		lines.append("Numero: %s" % str(product.get("imei", sku)))
-		lines.append("Placa: %s" % _blank(str(product.get("plate", ""))))
+		lines.append("Placa de identificacao: %s" % _blank(_identification_plate(product)))
+		lines.append("Veiculo atual: %s" % _blank(_vehicle_plate(product)))
 		lines.append("Status: %s" % str(product.get("tracker_status", "")))
 		lines.append("")
 
@@ -38467,31 +37523,19 @@ func _request_save_form() -> void:
 		# precisa descobrir um checkbox escondido para concluir o cadastro.
 		associate_vehicle = entered_plate != ""
 	var plate := entered_plate if associate_vehicle else ""
-	if editing_sku != "" and _grupo_rs_supports_modern_api():
-		var loaded_serial := _search_key(str(form_grupo_rs_data.get("serial", "")))
-		var current_remote_plate := _format_grupo_rs_vehicle_plate(str(form_grupo_rs_data.get("plate", "")))
-		var requested_plate := _format_grupo_rs_vehicle_plate(plate)
-		if loaded_serial == _search_key(imei) and current_remote_plate != "" \
-				and requested_plate != "" \
-				and _normalize_location_plate(current_remote_plate) != _normalize_location_plate(requested_plate):
-			_show_warning(
-				"Use Modificar para trocar a placa",
-				"A placa remota nao sera alterada pelo botao Salvar. Clique em Modificar para atualizar a placa, o titular e a associacao com confirmacao da API."
-			)
-			return
 	if editing_sku == "" and plate != "":
 		var registration_request := _equipment_registration_request_from_form()
 		var chip_query := _digits_only(str(registration_request.get("chip_number", "")))
 		if chip_query.length() < 6:
 			_show_warning("Dados do chip", "Informe o ICCID completo ou pelo menos 6 digitos finais para a busca em segundo plano.")
 			return
-		_show_equipment_registration_password_dialog(registration_request)
+		_confirm_action("Salvar aparelho", "Você deseja salvar esse aparelho?", func(): _save_form(registration_request))
 		return
 	if editing_sku == "" and (plate == "" or not associate_vehicle) and _grupo_rs_supports_modern_api():
 		var api_only_request := _equipment_registration_request_from_form()
 		if _digits_only(str(api_only_request.get("chip_number", ""))).length() >= 6:
 			api_only_request["equipment_only"] = true
-			_show_equipment_registration_password_dialog(api_only_request)
+			_confirm_action("Salvar aparelho", "Você deseja salvar esse aparelho?", func(): _save_form(api_only_request))
 			return
 
 	_confirm_action(
@@ -38526,13 +37570,13 @@ func _show_equipment_registration_password_dialog(request: Dictionary) -> void:
 	stack.add_theme_constant_override("separation", 13)
 	margin.add_child(stack)
 	var title := Label.new()
-	title.text = "Confirmar cadastro remoto"
+	title.text = "Confirmar salvamento no Banco local SQL"
 	title.add_theme_font_override("font", UI_FONT)
 	title.add_theme_font_size_override("font_size", 25)
 	title.add_theme_color_override("font_color", TEXT)
 	stack.add_child(title)
 	var notice := Label.new()
-	notice.text = "O cadastro entra na fila remota. Nenhum registro com placa sera salvo na Firebase ate a API confirmar o vinculo do IMEI; se a confirmacao demorar, a operacao permanecera pendente para nova tentativa."
+	notice.text = "Os dados preenchidos serao salvos no Banco local SQL. A API Grupo RS sera usada somente para consultas; nenhuma criacao ou alteracao sera enviada para a API."
 	notice.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	notice.add_theme_font_override("font", UI_FONT)
 	notice.add_theme_font_size_override("font_size", 16)
@@ -38574,7 +37618,7 @@ func _show_equipment_registration_password_dialog(request: Dictionary) -> void:
 	buttons.add_child(_make_action_button("Cancelar", Color("#eef3f8"), BORDER, BLUE_DARK, Vector2(120, 44), func(): layer.queue_free()))
 	var confirm := func() -> void:
 		if password_input.text != BULK_DELETE_CONFIRM_PASSWORD:
-			error_label.text = "Senha incorreta. O cadastro remoto continua bloqueado."
+			error_label.text = "Senha incorreta. O salvamento no Banco local SQL continua bloqueado."
 			password_input.select_all()
 			password_input.grab_focus()
 			return
@@ -38700,19 +37744,18 @@ func _start_equipment_registration_job(local_product: Dictionary, request: Dicti
 		return
 	if bool(result.get("ok", false)):
 		var equipment_only := bool(request.get("equipment_only", false))
-		var api_vehicle := bool(result.get("api_vehicle", false))
 		var confirmation_pending := bool(result.get("confirmation_pending", false))
 		if confirmation_pending and typeof(result.get("request", {})) == TYPE_DICTIONARY:
 			request.merge(result.get("request", {}) as Dictionary, true)
 		var confirmation_warning := str((result.get("vehicle", {}) as Dictionary).get("warning", "")).strip_edges()
-		var completion_detail := "Serie %s | sem placa alterada neste passo" % serial if equipment_only else "%s | %s | RS300 | Carro" % [str(request.get("plate", "")), serial]
+		var completion_detail := "Cadastro operacional local preparado; aguardando Banco local SQL."
 		if confirmation_warning != "":
 			completion_detail = "%s | %s" % [completion_detail, confirmation_warning]
 		if confirmation_pending:
 			completion_detail = str(result.get("message", completion_detail))
 		_show_equipment_registration_feedback(
-			"Cadastro aceito pela API" if confirmation_pending else ("Equipamento cadastrado pela API" if equipment_only else "Cadastro concluido"),
-			"Confirmacao completa pendente; nenhum fallback foi repetido" if confirmation_pending else ("Equipamento confirmado; placa e vinculo permanecem no portal web" if equipment_only else ("Placa e aparelho confirmados pela API oficial" if api_vehicle else "Placa criada e aparelho vinculado pelo portal web")),
+			"Consulta API pendente" if confirmation_pending else "Gravando Estoque",
+			"Confirmacao completa pendente; nenhum fallback foi repetido" if confirmation_pending else ("Equipamento sem placa remota alterada" if equipment_only else "API consultada; Store/Banco local SQL sao o destino operacional"),
 			completion_detail,
 			ORANGE if confirmation_pending else GREEN
 		)
@@ -38723,16 +37766,34 @@ func _start_equipment_registration_job(local_product: Dictionary, request: Dicti
 			if confirmation_pending:
 				_log_system_action("Confirmacao remota pendente", "A API aceitou a placa, mas a leitura completa ainda esta propagando. Nenhum fallback foi repetido. Serie: %s" % serial, serial)
 			else:
-				_log_system_action(
-					"Cadastrou equipamento pela API" if equipment_only else "Vinculou veiculo Grupo RS",
-					"Equipamento: %s | Placa/vinculo mantidos no portal web" % serial if equipment_only else "Placa: %s | Cliente: RS300 | Tipo: Carro | Equipamento: %s" % [str(request.get("plate", "")), serial],
-					serial
-				)
+				var local_database_result := await _ensure_local_database_modification_saved(serial, finalized.get("product", {}) as Dictionary)
+				if not bool(local_database_result.get("ok", false)):
+					var local_database_message := str(local_database_result.get("message", "O Banco local SQL nao confirmou a gravacao do cadastro."))
+					_show_equipment_registration_feedback(
+						"Cadastro pendente",
+						"Store local preservado; Banco local SQL nao confirmou",
+						local_database_message,
+						ORANGE
+					)
+					_log_system_action("Cadastro Banco local SQL pendente", local_database_message, serial)
+				else:
+					_log_system_action(
+						"Cadastrou equipamento no Estoque",
+						"API consultada; Store e Banco local SQL confirmados.",
+						serial
+					)
+					_refresh_table()
+					_show_equipment_registration_feedback(
+						"Cadastro concluido",
+						"Store e Banco local SQL confirmados",
+						"Registro operacional confirmado.",
+						GREEN
+					)
 		else:
 			_show_equipment_registration_feedback(
-				"Vinculacao remota concluida",
+				"Cadastro operacional pendente",
 				"Falha ao atualizar o cadastro local",
-				str(finalized.get("message", "O equipamento remoto foi vinculado, mas o cadastro local precisa ser conferido.")),
+				str(finalized.get("message", "O cadastro local precisa ser conferido.")),
 				RED
 			)
 			_log_system_action("Falhou atualizacao local apos vinculacao", str(finalized.get("message", "")), serial)
@@ -38842,59 +37903,44 @@ func _start_equipment_api_edit_job(local_product: Dictionary, request: Dictionar
 		return
 	var serial := _digits_only(str(request.get("serial", local_product.get("imei", ""))))
 	_show_equipment_registration_feedback(
-		"Edicao remota em andamento",
+		"Edicao operacional em andamento",
 		"Consultando equipamento pela API oficial",
-		"Serie %s | o cadastro local ja foi preservado." % serial,
+		"Consulta sanitizada | o cadastro local ja foi preservado.",
 		BLUE
 	)
 	var found := await _grupo_rs_api_find_equipment(serial, true)
 	if not _equipment_api_edit_is_current(generation):
 		return
-	if _grupo_rs_api_is_permission_denied(found):
-		var portal_login := await _grupo_rs_api_login_as_portal()
-		if not _equipment_api_edit_is_current(generation):
-			return
-		if bool(portal_login.get("ok", false)):
-			found = await _grupo_rs_api_find_equipment(serial, true)
-			if not _equipment_api_edit_is_current(generation):
-				return
-	var result: Dictionary = {}
-	if bool(found.get("ok", false)):
-		result = await _grupo_rs_api_patch_equipment(request, found.get("row", {}) as Dictionary)
-		if not _equipment_api_edit_is_current(generation):
-			return
-		if _grupo_rs_api_is_permission_denied(result):
-			var portal_login := await _grupo_rs_api_login_as_portal()
-			if not _equipment_api_edit_is_current(generation):
-				return
-			if bool(portal_login.get("ok", false)):
-				result = await _grupo_rs_api_patch_equipment(request, found.get("row", {}) as Dictionary)
-				if not _equipment_api_edit_is_current(generation):
-					return
-	else:
-		var lookup_code := int(found.get("response_code", 0))
-		var can_use_web_fallback := bool(found.get("fallback_web", false)) \
-				or bool(found.get("not_found", false)) \
-				or lookup_code in [403, 404, 405, 501]
-		if can_use_web_fallback and not bool(found.get("partial", false)):
-			_set_progress_dialog_content(null, "API sem leitura do equipamento; usando o portal web", "Serie %s" % serial)
-			result = await _modify_modern_equipment_via_web(request)
+	var result: Dictionary = {
+		"ok": bool(found.get("ok", false)) or bool(found.get("not_found", false)),
+		"query_only": true,
+		"equipment": found,
+		"message": str(found.get("message", "API consultada; gravacao operacional segue Store/Banco local SQL.")),
+	}
+	if not _equipment_api_edit_is_current(generation):
+		return
+	if bool(result.get("ok", false)):
+		var local_result := _finalize_local_equipment_modification(request)
+		if not bool(local_result.get("ok", false)):
+			result = {"ok": false, "message": str(local_result.get("message", "Falha ao atualizar o Store local."))}
 		else:
-			result = found
+			var local_database_result := await _ensure_local_database_modification_saved(serial, local_result.get("product", {}) as Dictionary)
+			if not bool(local_database_result.get("ok", false)):
+				result = {"ok": false, "local_database_pending": true, "message": str(local_database_result.get("message", "Banco local SQL nao confirmou a edicao operacional."))}
 	if not _equipment_api_edit_is_current(generation):
 		return
 	if bool(result.get("ok", false)):
 		_show_equipment_registration_feedback(
-			"Equipamento atualizado",
-			"Alteracao confirmada pela API oficial",
-			"Serie %s | APN, chip, telefone e campos permitidos sincronizados." % serial,
+			"Equipamento atualizado no Estoque",
+			"Store e Banco local SQL confirmados",
+			"API Grupo RS usada somente para consulta.",
 			GREEN
 		)
-		_log_system_action("Atualizou equipamento pela API", "Serie: %s" % serial, serial)
+		_log_system_action("Atualizou equipamento no Estoque", "API consultada; Store e Banco local SQL confirmados.", serial)
 	else:
 		var message := str(result.get("message", "A API nao confirmou a edicao do equipamento."))
 		_show_equipment_registration_feedback(
-			"Edicao remota interrompida",
+			"Edicao operacional pendente",
 			"Cadastro local preservado",
 			message,
 			RED
@@ -38981,168 +38027,33 @@ func _perform_equipment_registration(request: Dictionary) -> Dictionary:
 	var plate := _format_grupo_rs_vehicle_plate(str(request.get("plate", "")))
 	_remote_queue_stage(request, "Consultando equipamento", "API oficial | chip, telefone e APN")
 	if serial == "":
-		return {"ok": false, "message": "Serie ou placa ausente no cadastro remoto."}
+		return {"ok": false, "message": "Serie ou placa ausente no cadastro."}
 	if not bool(request.get("equipment_only", false)) and plate == "":
-		return {"ok": false, "message": "Serie ou placa ausente no cadastro remoto."}
+		return {"ok": false, "message": "Serie ou placa ausente no cadastro."}
 	if _digits_only(str(request.get("chip_number", ""))).length() < 18 or _local_registration_phone(str(request.get("phone", ""))) == "" or str(request.get("apn", "")).strip_edges().to_lower() not in ["hinova.br", "linksolutions.br"]:
 		return {"ok": false, "message": "A busca em segundo plano nao confirmou ICCID completo, telefone e APN do chip. O cadastro local foi preservado; tente novamente apos a consulta concluir."}
 	if _equipment_registration_timed_out():
 		return _equipment_registration_timeout_result("validacao inicial")
-	var equipment_result := await _register_or_find_modern_equipment(request)
+	var equipment_result := await _grupo_rs_api_find_equipment(serial, true)
 	if _equipment_registration_timed_out():
-		return _equipment_registration_timeout_result("confirmacao do equipamento")
-	if bool(equipment_result.get("confirmation_pending", false)):
-		request["_smart_confirmation_pending"] = true
+		return _equipment_registration_timeout_result("consulta do equipamento")
+	if not bool(equipment_result.get("ok", false)) and not bool(equipment_result.get("not_found", false)):
 		return {
-			"ok": true,
-			"partial": true,
-			"confirmation_pending": true,
-			"message": str(equipment_result.get("message", "A API aceitou o equipamento, mas a confirmacao ainda esta pendente.")),
+			"ok": false,
+			"message": str(equipment_result.get("message", "A API Grupo RS nao confirmou a consulta do equipamento.")),
 			"response_code": int(equipment_result.get("response_code", 0)),
-			"equipment": equipment_result,
-			"request": request,
 		}
-	if not bool(equipment_result.get("ok", false)):
-		# A API e sempre tentada primeiro. Se ela falhar antes de aceitar a
-		# gravacao, o formulario web assume a operacao; respostas parciais nunca
-		# sao repetidas para evitar duplicidade.
-		if bool(equipment_result.get("fallback_web", false)) and not bool(equipment_result.get("partial", false)):
-			_remote_queue_stage(request, "Cadastro do equipamento", "API indisponivel; usando portal web", "fallback", "Fallback web")
-			_show_equipment_registration_feedback(
-				"Cadastro remoto em andamento",
-				"API de equipamentos indisponivel; usando o portal web como fallback",
-				str(equipment_result.get("message", "A API nao aceitou o cadastro do equipamento.")),
-				ORANGE
-			)
-			equipment_result = await _register_modern_equipment_via_web(request)
-			if _equipment_registration_timed_out():
-				return _equipment_registration_timeout_result("fallback web do equipamento")
-		if not bool(equipment_result.get("ok", false)):
-			return equipment_result
-	# Um HTTP 2xx da gravacao nao basta: confirme a serie e compare os dados
-	# explicitos do chip antes de iniciar a etapa da placa. Se a API ainda estiver
-	# propagando a linha, mantenha a operacao pendente e nao repita pelo portal.
-	if not bool(equipment_result.get("web", false)):
-		var equipment_confirmation := await _confirm_smart_registered_equipment(request, equipment_result)
-		if not bool(equipment_confirmation.get("ok", false)):
-			return equipment_confirmation
-		if typeof(equipment_confirmation.get("row", {})) == TYPE_DICTIONARY:
-			equipment_result["row"] = equipment_confirmation.get("row", {})
 	request["_smart_plan_state"] = "equipment_confirmed"
 	if bool(request.get("equipment_only", false)):
-		return {"ok": true, "equipment": equipment_result, "equipment_only": true}
-
-	_show_equipment_registration_feedback(
-		"Cadastro remoto em andamento",
-		"Equipamento confirmado; abrindo cadastro do veiculo",
-		"Serie %s | agora a placa sera criada com o aparelho vinculado." % serial,
-		BLUE
-	)
-	_remote_queue_stage(request, "Vinculando com a placa", plate, "running", "API")
-	if _equipment_registration_timed_out():
-		return _equipment_registration_timeout_result("preparacao da placa")
-
-	# A API oficial agora tambem grava a placa e a associacao. So usamos o
-	# formulario web quando a rota de veiculos estiver ausente ou sem permissao;
-	# uma resposta aceita sem confirmacao nunca e repetida por outro canal.
-	var api_vehicle_result := await _grupo_rs_api_register_vehicle(request, equipment_result.get("row", {}) as Dictionary)
-	if _equipment_registration_timed_out():
-		return _equipment_registration_timeout_result("cadastro da placa e associacao")
-	if bool(api_vehicle_result.get("ok", false)):
-		# A associacao so e sucesso quando a rota devolve uma linha confirmada.
-		# Quando a API apenas aceitou o POST e ainda nao publicou a linha, o
-		# cadastro permanece pendente: nao finalizamos o estoque nem exibimos
-		# "sucesso" com uma placa que ainda nao foi vinculada.
-		if bool(api_vehicle_result.get("confirmation_pending", false)):
-			request["_smart_confirmation_pending"] = true
-			return {
-				"ok": true,
-				"partial": true,
-				"confirmation_pending": true,
-				"message": "A API aceitou a placa, mas ainda nao confirmou o equipamento vinculado. Nenhuma mensagem de sucesso foi emitida; tente sincronizar novamente quando a linha aparecer.",
-				"equipment": equipment_result,
-				"vehicle": api_vehicle_result,
-				"request": request,
-			}
-		# A resposta confirmada da API ja prova placa + equipamento. Se a rota nao
-		# devolveu uma linha (compatibilidade com respostas antigas), usamos a
-		# verificacao HTML como segunda fonte antes de concluir; nunca concluimos
-		# com um marcador inventado.
-		var api_vehicle_row := api_vehicle_result.get("row", {}) as Dictionary
-		if api_vehicle_row.is_empty():
-			var full_vehicle_confirmation := await _verify_modern_vehicle_registration(serial, plate)
-			if not bool(full_vehicle_confirmation.get("ok", false)):
-				request["_smart_confirmation_pending"] = true
-				return {
-					"ok": true,
-					"partial": true,
-					"confirmation_pending": true,
-					"pending_verify": true,
-					"message": "A API aceitou a placa, mas a confirmacao do equipamento ainda nao foi publicada.",
-					"equipment": equipment_result,
-					"vehicle": api_vehicle_result,
-					"request": request,
-				}
-			api_vehicle_result["full_verification"] = full_vehicle_confirmation
-		request["_smart_plan_state"] = "remote_confirmed"
-		return {"ok": true, "equipment": equipment_result, "vehicle": api_vehicle_result, "api_vehicle": true}
-	if not bool(api_vehicle_result.get("fallback_web", false)):
-		return api_vehicle_result
-	_show_equipment_registration_feedback(
-		"Cadastro remoto em andamento",
-		"API de placas indisponivel; usando o portal web como fallback",
-		str(api_vehicle_result.get("message", "A API nao aceitou a rota de veiculos.")),
-		ORANGE
-	)
-	_remote_queue_stage(request, "Vinculando com a placa", plate, "fallback", "Fallback web")
-	if _equipment_registration_timed_out():
-		return _equipment_registration_timeout_result("fallback web da placa")
-
-	var page: Dictionary = {}
-	var built: Dictionary = {}
-	for attempt in range(2):
-		page = await _modern_grupo_rs_get("veiculos_editar.php?acao=novo")
-		if not bool(page.get("ok", false)):
-			return {"ok": false, "message": "Nao foi possivel abrir a tela de novo veiculo no Grupo RS."}
-		var form_html := _extract_html_form_by_action(str(page.get("body", "")), "veiculos_actions.php")
-		built = _build_modern_vehicle_registration_fields(form_html, request)
-		if bool(built.get("ok", false)):
-			break
-		var build_message := str(built.get("message", ""))
-		if not build_message.contains("lista Trocar Equipamento"):
-			return built
-		if attempt < 1:
-			await get_tree().create_timer(0.8).timeout
-	if not bool(built.get("ok", false)):
-		return built
-
-	_show_equipment_registration_feedback(
-		"Cadastro remoto em andamento",
-		"Salvando placa e vinculando equipamento",
-		"Aguardando confirmacao do Grupo RS...",
-		BLUE
-	)
-	var response := await _modern_grupo_rs_post_form(
-		"veiculos_actions.php",
-		built.get("fields", {}) as Dictionary,
-		"veiculos_editar.php?acao=novo",
-		true,
-		0
-	)
-	if _equipment_registration_timed_out():
-		return _equipment_registration_timeout_result("envio do formulario web")
-	var transport_message := ""
-	if not bool(response.get("ok", false)):
-		transport_message = str(response.get("message", "Conexao encerrada antes da resposta.")).strip_edges()
-	var verification := await _verify_modern_vehicle_registration(serial, plate)
-	if _equipment_registration_timed_out():
-		return _equipment_registration_timeout_result("confirmacao da placa e associacao")
-	if bool(verification.get("ok", false)):
-		return {"ok": true, "verification": verification, "transport_warning": transport_message, "api_vehicle": false}
-	var message := str(verification.get("message", "O Grupo RS nao confirmou a placa e o equipamento."))
-	if transport_message != "":
-		message = "%s. %s" % [transport_message, message]
-	return {"ok": false, "message": message, "partial": true}
+		return {"ok": true, "equipment": equipment_result, "equipment_only": true, "query_only": true}
+	request["_smart_plan_state"] = "local_local_database_only"
+	return {
+		"ok": true,
+		"equipment": equipment_result,
+		"vehicle": {"ok": true, "skipped": true},
+		"query_only": true,
+		"message": "API Grupo RS usada somente para consulta; gravacao operacional segue Store/Banco local SQL.",
+	}
 
 
 func _register_or_find_modern_equipment(request: Dictionary) -> Dictionary:
@@ -39561,79 +38472,22 @@ func _perform_equipment_modification(request: Dictionary, progress: CanvasLayer 
 	var serial := _digits_only(str(request.get("serial", request.get("remote_serial", ""))))
 	if serial == "":
 		return {"ok": false, "message": "Numero de serie ausente para a modificacao remota."}
-	_set_progress_dialog_content(progress, "1/3 Consultando o equipamento pela API oficial", "Serie %s" % serial)
+	_set_progress_dialog_content(progress, "1/2 Consultando o equipamento pela API oficial", "Consulta sanitizada")
 	var found := await _grupo_rs_api_find_equipment(serial, true)
-	if _grupo_rs_api_is_permission_denied(found):
-		var portal_login := await _grupo_rs_api_login_as_portal()
-		if bool(portal_login.get("ok", false)):
-			found = await _grupo_rs_api_find_equipment(serial, true)
-	var equipment_activated := false
-	if bool(found.get("ok", false)):
-		_set_progress_dialog_content(progress, "2/3 Verificando status do aparelho", "Ativando automaticamente se estiver inativo")
-		var activation := await _grupo_rs_api_activate_equipment(found.get("row", {}) as Dictionary, serial)
-		if not bool(activation.get("ok", false)):
-			# Algumas instalacoes deixam a acao de ativar somente no portal web.
-			# Nao encerre a modificacao antes de tentar o comando exposto para o
-			# mesmo serial; a leitura posterior continua obrigatoria.
-			var portal_activation_after_api_error := await _activate_modern_grupo_rs_equipment_if_needed(serial)
-			if not bool(portal_activation_after_api_error.get("ok", false)):
-				return portal_activation_after_api_error
-			activation = portal_activation_after_api_error
-		else:
-			# Mesmo quando a API diz que ativou, confirme o estado no portal para
-			# evitar concluir com o equipamento ainda Inativo na plataforma.
-			var portal_activation := await _activate_modern_grupo_rs_equipment_if_needed(serial)
-			if not bool(portal_activation.get("ok", false)):
-				return portal_activation
-			if bool(portal_activation.get("activated", false)):
-				activation = portal_activation
-		equipment_activated = bool(activation.get("activated", false))
-		if equipment_activated:
-			found["row"] = activation.get("row", found.get("row", {}))
-	else:
-		# Quando a API principal estiver indisponivel, ainda assim verifique o
-		# estado no portal antes de executar o fallback de edicao.
-		var portal_activation_without_api := await _activate_modern_grupo_rs_equipment_if_needed(serial)
-		if not bool(portal_activation_without_api.get("ok", false)):
-			return portal_activation_without_api
-		equipment_activated = bool(portal_activation_without_api.get("activated", false))
-	var equipment_result: Dictionary = {"ok": true, "skipped": true}
-	if not bool(request.get("equipment_fields_changed", true)):
-		_set_progress_dialog_content(progress, "2/3 Equipamento sem alteracoes", "Somente a placa sera modificada")
-	elif bool(found.get("ok", false)):
-		_set_progress_dialog_content(progress, "2/3 Atualizando chip, telefone e APN", "A API altera somente os campos informados")
-		equipment_result = await _grupo_rs_api_patch_equipment(request, found.get("row", {}) as Dictionary)
-		if not bool(equipment_result.get("ok", false)) and bool(equipment_result.get("fallback_web", false)):
-			equipment_result = await _modify_modern_equipment_via_web(request)
-	elif bool(request.get("equipment_fields_changed", true)):
-		_set_progress_dialog_content(progress, "2/3 API indisponivel; usando o portal web", "A serie foi confirmada na consulta do Grupo RS")
-		equipment_result = await _modify_modern_equipment_via_web(request)
-	if not bool(equipment_result.get("ok", false)):
-		return equipment_result
-	if bool(request.get("clear_vehicle_association", false)):
-		_set_progress_dialog_content(progress, "3/3 Removendo o vinculo veicular", "Acao explicita de devolucao ao estoque")
-		var unlinked := await _delete_modern_grupo_rs_vehicle_for_serial(serial)
-		if not bool(unlinked.get("ok", false)):
-			return {"ok": false, "message": str(unlinked.get("message", "Nao foi possivel limpar o vinculo veicular.")), "vehicle": unlinked}
-		return {"ok": true, "equipment": equipment_result, "vehicle": unlinked, "unlinked": true, "equipment_activated": equipment_activated}
-
-	var new_plate := _format_grupo_rs_vehicle_plate(str(request.get("vehicle_target_plate", request.get("new_plate", ""))))
-	var old_plate := _format_grupo_rs_vehicle_plate(str(request.get("old_plate", "")))
-	# Mesmo sem trocar a placa, a associacao pode estar com titular/tipo/dados
-	# legados. Reaplique a politica na placa atual quando houver uma associacao.
-	if new_plate != "" and bool(request.get("apply_vehicle_policy", true)):
-		_set_progress_dialog_content(progress, "3/3 Modificando a placa e confirmando o vinculo", "%s -> %s" % [old_plate if old_plate != "" else "sem placa", new_plate])
-		var vehicle_request := request.duplicate(true)
-		vehicle_request["new_plate"] = new_plate
-		vehicle_request["vehicle_target_plate"] = new_plate
-		vehicle_request["apply_vehicle_policy"] = true
-		var vehicle_result := await _perform_api_vehicle_modification(vehicle_request)
-		if not bool(vehicle_result.get("handled", false)):
-			vehicle_result = await _perform_modern_vehicle_modification(vehicle_request)
-		if not bool(vehicle_result.get("ok", false)):
-			return vehicle_result
-		return {"ok": true, "equipment": equipment_result, "vehicle": vehicle_result, "equipment_activated": equipment_activated}
-	return {"ok": true, "equipment": equipment_result, "vehicle": {"ok": true, "skipped": true}, "equipment_activated": equipment_activated}
+	if not bool(found.get("ok", false)) and not bool(found.get("not_found", false)):
+		return {
+			"ok": false,
+			"message": str(found.get("message", "A API Grupo RS nao confirmou a consulta do equipamento.")),
+			"response_code": int(found.get("response_code", 0)),
+		}
+	_set_progress_dialog_content(progress, "2/2 Gravando espelho operacional", "Store/Banco local SQL")
+	return {
+		"ok": true,
+		"equipment": found,
+		"vehicle": {"ok": true, "skipped": true},
+		"query_only": true,
+		"message": "API Grupo RS usada somente para consulta; modificacao operacional segue Store/Banco local SQL.",
+	}
 
 
 func _perform_api_vehicle_modification(request: Dictionary) -> Dictionary:
@@ -39786,7 +38640,7 @@ func _finalize_local_equipment_modification(request: Dictionary) -> Dictionary:
 	if product.is_empty():
 		product = store.get_product(serial)
 	if product.is_empty():
-		# Aparelhos que ja existiam no Grupo RS antes da implantacao do Firebase
+		# Aparelhos que ja existiam no Grupo RS antes da implantacao do Banco local SQL
 		# nao possuem uma linha local ainda. Depois de uma modificacao remota
 		# confirmada, crie o espelho completo em vez de descartar a alteracao.
 		# Assim o primeiro sincronismo passa a ser um cadastro valido, nunca um
@@ -39810,7 +38664,7 @@ func _finalize_local_equipment_modification(request: Dictionary) -> Dictionary:
 			"active": true,
 			"stock": 1,
 			"source": "grupo_rs_modificacao",
-			"notes": "Registro importado do Grupo RS durante uma modificacao; aparelho preexistente ao Firebase.",
+			"notes": "Registro importado do Grupo RS durante uma modificacao; aparelho preexistente ao Banco local SQL.",
 		}
 	product["sku"] = sku.to_upper() if sku != "" else serial
 	product["imei"] = serial
@@ -39859,22 +38713,22 @@ func _finalize_local_equipment_modification(request: Dictionary) -> Dictionary:
 	return {"ok": not saved.is_empty(), "product": saved, "message": "Falha ao atualizar o cadastro local." if saved.is_empty() else ""}
 
 
-func _ensure_firebase_modification_saved(serial: String = "", expected_product: Dictionary = {}) -> Dictionary:
+func _ensure_local_database_modification_saved(serial: String = "", expected_product: Dictionary = {}) -> Dictionary:
 	if store == null:
-		return {"ok": false, "message": "A base operacional nao esta disponivel para salvar a modificacao no Firebase."}
-	var firebase_sync := _firebase_sync()
-	if firebase_sync == null or not firebase_sync.has_method("sync_now"):
-		return {"ok": false, "message": "O sincronizador do Firebase nao esta disponivel; a modificacao nao foi marcada como concluida."}
-	var synced: Variant = await firebase_sync.call("sync_now")
+		return {"ok": false, "message": "A base operacional nao esta disponivel para salvar a modificacao no Banco local SQL."}
+	var local_database_sync := _local_database_sync()
+	if local_database_sync == null or not local_database_sync.has_method("sync_now"):
+		return {"ok": false, "message": "O sincronizador do Banco local SQL nao esta disponivel; a modificacao nao foi marcada como concluida."}
+	var synced: Variant = await local_database_sync.call("sync_now")
 	var status: Dictionary = synced as Dictionary if typeof(synced) == TYPE_DICTIONARY else {}
 	if bool(status.get("ok", false)):
-		if not expected_product.is_empty() and firebase_sync.has_method("verify_product_persisted"):
-			var verification: Variant = await firebase_sync.call("verify_product_persisted", serial, expected_product)
+		if not expected_product.is_empty() and local_database_sync.has_method("verify_product_persisted"):
+			var verification: Variant = await local_database_sync.call("verify_product_persisted", serial, expected_product)
 			var verified: Dictionary = verification as Dictionary if typeof(verification) == TYPE_DICTIONARY else {}
 			if not bool(verified.get("ok", false)):
 				return {
 					"ok": false,
-					"message": str(verified.get("message", "O Firebase nao confirmou a leitura da alteracao.")),
+					"message": str(verified.get("message", "O Banco local SQL nao confirmou a leitura da alteracao.")),
 					"status": status,
 					"verification": verified,
 				}
@@ -39882,7 +38736,7 @@ func _ensure_firebase_modification_saved(serial: String = "", expected_product: 
 		return {"ok": true, "status": status, "serial": serial}
 	return {
 		"ok": false,
-		"message": "A modificacao remota foi confirmada, mas o Firebase nao confirmou a gravacao local%s. A operacao nao sera apresentada como concluida." % (" da serie %s" % serial if serial != "" else ""),
+		"message": "A modificacao remota foi confirmada, mas o Banco local SQL nao confirmou a gravacao local%s. A operacao nao sera apresentada como concluida." % (" da serie %s" % serial if serial != "" else ""),
 		"status": status,
 	}
 
@@ -40192,7 +39046,7 @@ func _show_vehicle_reassignment_password_dialog(request: Dictionary) -> void:
 	password_label.add_theme_color_override("font_color", MUTED)
 	stack.add_child(password_label)
 	var password_input := LineEdit.new()
-	password_input.placeholder_text = "Senha para modificar no RS"
+	password_input.placeholder_text = "Senha para salvar no Banco local SQL"
 	password_input.secret = true
 	password_input.custom_minimum_size = Vector2(0, 48)
 	_style_line_edit(password_input)
@@ -40210,14 +39064,14 @@ func _show_vehicle_reassignment_password_dialog(request: Dictionary) -> void:
 	buttons.add_child(_make_action_button("Cancelar", Color("#eef3f8"), BORDER, BLUE_DARK, Vector2(120, 44), func(): layer.queue_free()))
 	var confirm_password := func() -> void:
 		if password_input.text != BULK_DELETE_CONFIRM_PASSWORD:
-			error_label.text = "Senha incorreta. A modificacao continua bloqueada."
+			error_label.text = "Senha incorreta. O salvamento no Banco local SQL continua bloqueado."
 			password_input.select_all()
 			password_input.grab_focus()
 			return
 		layer.queue_free()
-		if remote_queue_controller != null and is_instance_valid(remote_queue_controller):
-			var local_product := store.get_product(str(request.get("local_sku", ""))) if store != null else {}
-			remote_queue_controller.enqueue("Modificacao", local_product, request)
+		# O cadastro do Estoque nao modifica a API. A consulta ja foi feita;
+		# salvar a edicao segue pelo Store/Banco local SQL no fluxo local.
+		_save_form()
 	password_input.text_submitted.connect(func(_value: String): confirm_password.call())
 	buttons.add_child(_make_action_button("Confirmar modificacao", RED, RED, Color.WHITE, Vector2(210, 44), confirm_password))
 	panel.modulate.a = 0.0
@@ -40238,7 +39092,7 @@ func _on_remote_operation_localized(kind: String, serial: String) -> void:
 	var current_serial := _digits_only(_field_text("imei")) if form_fields.has("imei") else ""
 	# A fila conclui a modificacao enquanto o formulario ainda esta aberto.
 	# Nessa situacao editing_sku pode estar vazio (por exemplo, aparelho
-	# legado/inicializado fora do Firebase), portanto a presenca de um campo IMEI
+	# legado/inicializado fora do Banco local SQL), portanto a presenca de um campo IMEI
 	# e a evidencia mais confiavel de que devemos voltar para a lista.
 	var imei_field: Variant = form_fields.get("imei", null)
 	var on_equipment_form := editing_sku != "" or (imei_field is LineEdit and is_instance_valid(imei_field))
@@ -40274,11 +39128,11 @@ func _execute_equipment_modification(request: Dictionary) -> void:
 		_log_system_action("Falhou atualizacao local apos modificacao", str(local_result.get("message", "")), serial)
 		_show_error("Modificacao remota", "O Grupo RS confirmou a modificacao, mas o cadastro local nao foi atualizado.")
 		return
-	var firebase_result := await _ensure_firebase_modification_saved(serial, local_result.get("product", {}) as Dictionary)
-	if not bool(firebase_result.get("ok", false)):
-		var firebase_message := str(firebase_result.get("message", "O Firebase nao confirmou a gravacao da modificacao."))
-		_log_system_action("Falhou gravacao Firebase apos modificacao", firebase_message, serial)
-		_show_error("Modificacao remota", firebase_message)
+	var local_database_result := await _ensure_local_database_modification_saved(serial, local_result.get("product", {}) as Dictionary)
+	if not bool(local_database_result.get("ok", false)):
+		var local_database_message := str(local_database_result.get("message", "O Banco local SQL nao confirmou a gravacao da modificacao."))
+		_log_system_action("Falhou gravacao Banco local SQL apos modificacao", local_database_message, serial)
+		_show_error("Modificacao remota", local_database_message)
 		return
 	var details := "Serie: %s | Placa: %s | Chip: %s | Telefone: %s | APN: %s" % [
 		serial,
@@ -40372,7 +39226,7 @@ func _perform_vehicle_reassignment(request: Dictionary, progress: CanvasLayer = 
 		return {
 			"ok": false,
 			"partial": true,
-			"message": "Os dois sistemas remotos confirmaram a operacao, mas o Firebase nao aceitou a atualizacao: %s" % str(local_result.get("message", "")),
+			"message": "Os dois sistemas remotos confirmaram a operacao, mas o Banco local SQL nao aceitou a atualizacao: %s" % str(local_result.get("message", "")),
 		}
 	return {
 		"ok": true,
@@ -40481,8 +39335,6 @@ func _save_form(remote_request: Dictionary = {}) -> void:
 		notes_parts.append("APN: %s" % apn)
 	var requested_plate := _format_grupo_rs_vehicle_plate(_field_text("plate"))
 	var remote_pending := not remote_request.is_empty()
-	if remote_pending and requested_plate != "":
-		notes_parts.append("Vinculacao pendente: %s" % requested_plate)
 
 	var product := {
 		"sku": imei.to_upper(),
@@ -40493,11 +39345,11 @@ func _save_form(remote_request: Dictionary = {}) -> void:
 		"chip_phone": chip_phone,
 		"model": model,
 		"operator": operator_name,
-		# Enquanto a API nao confirmar, nao exponha a placa como se ja estivesse
-		# vinculada. A finalizacao remota preenche estes campos somente apos a
-		# leitura confirmada da associacao.
-		"plate": "" if remote_pending else requested_plate,
-		"client": "" if remote_pending else client_name,
+		# O Estoque usa a API somente para consulta. Os dados preenchidos pelo
+		# usuario/consulta, inclusive a placa, devem ser persistidos no Banco local SQL
+		# sem aguardar uma escrita remota na API.
+		"plate": requested_plate,
+		"client": client_name,
 		"tracker_status": status,
 		"status": status,
 		"name": _name_from_form(imei),
@@ -40528,21 +39380,9 @@ func _save_form(remote_request: Dictionary = {}) -> void:
 			equipment_registration_running = false
 		return
 
-	# Cadastro remoto e transacional: nao persistir um rascunho sem placa antes
-	# da confirmacao estrita da API. A fila mantem os dados somente em memoria e
-	# a finalizacao grava o produto apenas quando IMEI e placa forem confirmados.
-	if not remote_request.is_empty():
-		if remote_queue_controller != null and is_instance_valid(remote_queue_controller):
-			var queue_id: String = remote_queue_controller.enqueue("Cadastro", product.duplicate(true), remote_request.duplicate(true))
-			if queue_id != "":
-				return
-		else:
-			var legacy_queue_id: String = _enqueue_remote_operation("Cadastro", product.duplicate(true), remote_request.duplicate(true))
-			if legacy_queue_id != "":
-				return
-		equipment_registration_running = false
-		_show_error("Cadastro remoto", "Nao foi possivel colocar o cadastro na fila. Nenhum dado foi gravado.")
-		return
+	# O cadastro do Estoque e local/Banco local SQL-only: a API Grupo RS pode ser
+	# consultada para preencher dados, mas nunca recebe uma operacao de escrita.
+	# O request recebido aqui e apenas o resultado da consulta read-only.
 
 	var saved := store.upsert_product_replacing_sku(old_sku, product)
 	if saved.is_empty():
@@ -40556,28 +39396,24 @@ func _save_form(remote_request: Dictionary = {}) -> void:
 	if old_sku != "" and old_sku != target_sku:
 		details += " | Codigo anterior: %s" % old_sku
 	_log_system_action(action, details, target_sku)
-	var api_edit_request: Dictionary = {}
-	if was_editing and remote_request.is_empty() and _grupo_rs_supports_modern_api():
-		api_edit_request = _equipment_registration_request_from_form()
-		api_edit_request["serial"] = imei
 	_show_list()
-	if not api_edit_request.is_empty():
-		if remote_queue_controller != null and is_instance_valid(remote_queue_controller):
-			remote_queue_controller.enqueue("Modificacao", saved.duplicate(true), api_edit_request.duplicate(true))
-		else:
-			_enqueue_equipment_api_edit(saved, api_edit_request)
-	if not remote_request.is_empty():
-		if remote_queue_controller != null and is_instance_valid(remote_queue_controller):
-			remote_queue_controller.enqueue("Cadastro", saved.duplicate(true), remote_request.duplicate(true))
+	# O Estoque nao envia modificacoes de cadastro para a API. A API e usada
+	# somente nas consultas; o registro persistido e confirmado no Banco local SQL.
+	var local_database_result := await _ensure_local_database_modification_saved(target_sku, saved)
+	if not bool(local_database_result.get("ok", false)):
+		if not remote_request.is_empty():
+			equipment_registration_running = false
+		_show_error(
+			"Gravacao nao confirmada",
+			str(local_database_result.get("message", "O arquivo SQLite nao confirmou o cadastro ou a alteracao. Nenhuma mensagem de sucesso sera exibida."))
+		)
 		return
-
-	await get_tree().process_frame
-
-	_show_error_dialog(
-	true,
-	"Sucesso",
-	"Aparelho salvo com sucesso!"
-)
+	if not remote_request.is_empty():
+		equipment_registration_running = false
+	_show_success(
+		"Atualizacao salva" if was_editing else "Cadastro salvo",
+		"Os dados foram gravados e relidos diretamente do arquivo SQLite. Nenhuma alteracao foi enviada para a API."
+	)
 
 
 func _preview_timeline_import() -> void:
@@ -41058,6 +39894,9 @@ func _request_bulk_client_maintenance_lookup() -> void:
 
 
 func _request_bulk_client_sga_lookup() -> void:
+	if not SGA_ENABLED:
+		_show_warning("SGA removido", "As consultas SGA foram removidas desta versao.")
+		return
 	if bulk_client_lookup_running:
 		_show_warning("Consulta SGA", "Aguarde a consulta em andamento terminar.")
 		return
@@ -45444,7 +44283,7 @@ func _build_situation_panel(_stats: Dictionary) -> Control:
 	stack.add_theme_constant_override("separation", 0)
 	panel.add_child(stack)
 
-	stack.add_child(_make_chart_header("Saúde do servidor", GREEN, Callable(self, "_show_system_health"), "Ver detalhes"))
+	stack.add_child(_make_chart_header("Status do banco local", GREEN, Callable(self, "_show_system_health"), "Ver diagnóstico"))
 
 	var margin := MarginContainer.new()
 	margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -45474,7 +44313,7 @@ func _build_situation_panel(_stats: Dictionary) -> Control:
 	core_box.add_child(server_health_core)
 
 	server_health_state_label = Label.new()
-	server_health_state_label.text = "Servidor conectado"
+	server_health_state_label.text = "SQLite operacional"
 	server_health_state_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	server_health_state_label.add_theme_font_override("font", UI_FONT)
 	server_health_state_label.add_theme_font_size_override("font_size", 19)
@@ -45493,14 +44332,14 @@ func _build_situation_panel(_stats: Dictionary) -> Control:
 	body.add_child(details)
 
 	var eyebrow := Label.new()
-	eyebrow.text = "Firebase / Realtime Database"
+	eyebrow.text = "ARMAZENAMENTO LOCAL / SQLITE"
 	eyebrow.add_theme_font_override("font", UI_FONT)
 	eyebrow.add_theme_font_size_override("font_size", 13)
 	eyebrow.add_theme_color_override("font_color", MUTED)
 	details.add_child(eyebrow)
 
 	server_health_detail_label = Label.new()
-	server_health_detail_label.text = "Servidor conectado\nFirebase / Realtime Database"
+	server_health_detail_label.text = "Banco local pronto\nDados da filial protegidos no SQLite"
 	server_health_detail_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	server_health_detail_label.custom_minimum_size = Vector2(330, 54)
 	server_health_detail_label.add_theme_font_override("font", UI_FONT)
@@ -45517,21 +44356,21 @@ func _build_situation_panel(_stats: Dictionary) -> Control:
 	details.add_child(metrics)
 
 	server_health_latency_label = Label.new()
-	server_health_latency_label.text = "Latencia\n--"
+	server_health_latency_label.text = "Leitura\n--"
 	server_health_latency_label.add_theme_font_override("font", UI_FONT)
 	server_health_latency_label.add_theme_font_size_override("font_size", 15)
 	server_health_latency_label.add_theme_color_override("font_color", BLUE_DARK)
 	metrics.add_child(server_health_latency_label)
 
 	server_health_sync_label = Label.new()
-	server_health_sync_label.text = "Ultimo acesso\nAguardando"
+	server_health_sync_label.text = "Ultima gravacao\nAguardando"
 	server_health_sync_label.add_theme_font_override("font", UI_FONT)
 	server_health_sync_label.add_theme_font_size_override("font_size", 15)
 	server_health_sync_label.add_theme_color_override("font_color", BLUE_DARK)
 	metrics.add_child(server_health_sync_label)
 
 	var protection := Label.new()
-	protection.text = "Servidor conectado"
+	protection.text = "Operacao offline disponivel"
 	protection.add_theme_font_override("font", UI_FONT)
 	protection.add_theme_font_size_override("font_size", 14)
 	protection.add_theme_color_override("font_color", GREEN)
@@ -45539,7 +44378,7 @@ func _build_situation_panel(_stats: Dictionary) -> Control:
 	details.add_child(protection)
 
 	var history_title := Label.new()
-	history_title.text = "Ultimas verificacoes"
+	history_title.text = "Ultimas verificacoes locais"
 	history_title.add_theme_font_override("font", UI_FONT)
 	history_title.add_theme_font_size_override("font_size", 12)
 	history_title.add_theme_color_override("font_color", BLUE_DARK)
@@ -45547,11 +44386,11 @@ func _build_situation_panel(_stats: Dictionary) -> Control:
 	server_health_history_body = VBoxContainer.new()
 	server_health_history_body.add_theme_constant_override("separation", 3)
 	details.add_child(server_health_history_body)
-	_render_dashboard_firebase_history()
+	_render_dashboard_local_database_history()
 
-	var firebase_sync := _firebase_sync()
-	if firebase_sync != null:
-		call_deferred("_on_firebase_status_changed", firebase_sync.call("get_status"))
+	var local_database_sync := _local_database_sync()
+	if local_database_sync != null:
+		call_deferred("_on_local_database_status_changed", local_database_sync.call("get_status"))
 
 	return panel
 
@@ -47795,13 +46634,35 @@ func _request_exit() -> void:
 func _log_system_action(action: String, details: String = "", sku: String = "") -> void:
 	if store == null:
 		return
-	store.add_system_log(action, details, sku)
+	store.add_system_log(action, _sanitize_inventory_log_details(details), sku)
 
 
 func _log_system_action_event(action: String, details: String = "", sku: String = "", metadata: Dictionary = {}) -> void:
 	if store == null:
 		return
-	store.call("add_system_log_event", action, details, sku, metadata)
+	store.call("add_system_log_event", action, _sanitize_inventory_log_details(details), sku, _sanitize_inventory_log_metadata(metadata))
+
+
+func _sanitize_inventory_log_details(details: String) -> String:
+	var sanitized := details
+	for pattern in [
+		"(?i)(Serie|Série|SKU|Chave|Key|Equipamento|ICCID|Chip|Telefone|Numero|Número|Placa|Payload|Detalhes)\\s*:\\s*[^|\\n]+",
+		"(?i)(Serie|Série|SKU|Chave|Key|Equipamento|ICCID|Chip|Telefone|Numero|Número|Placa|Payload|Detalhes)\\s+[^|\\n]+",
+		"\\b[A-Z]{3}\\s*-?\\s*[0-9][A-Z0-9]{2,4}\\b",
+		"\\b\\d{8,22}\\b",
+	]:
+		var regex := RegEx.new()
+		if regex.compile(pattern) == OK:
+			sanitized = regex.sub(sanitized, "[dado_sanitizado]", true)
+	return sanitized
+
+
+func _sanitize_inventory_log_metadata(metadata: Dictionary) -> Dictionary:
+	var sanitized := metadata.duplicate(true)
+	for key in ["serial", "serie", "sku", "technical_key", "local_database_key", "store_key", "imei", "chip", "iccid", "phone", "telefone", "plate", "placa", "token", "payload", "body", "response", "details", "detalhes", "message"]:
+		if sanitized.has(key):
+			sanitized[key] = "[dado_sanitizado]"
+	return sanitized
 
 
 func _log_product_details(product: Dictionary) -> String:
@@ -48115,7 +46976,7 @@ func legacy_enqueue_remote_operation(kind: String, local_product: Dictionary, re
 	# RemoteOperationQueueScript (remote_operation_queue_current.gd) em _build_ui.
 	# Se este fallback interno for alcançado por uma falha de inicialização, ele
 	# deve obedecer às mesmas barreiras do controller atual: API confirmada,
-	# Store local atualizada e Firebase verificado antes de exibir sucesso.
+	# Store local atualizada e Banco local SQL verificado antes de exibir sucesso.
 	var serial := _digits_only(str(request.get("serial", request.get("remote_serial", local_product.get("imei", "")))))
 	if serial == "" or _remote_queue_has_serial(serial):
 		return ""
@@ -48166,17 +47027,17 @@ func legacy_run_remote_operation_job(job: Dictionary) -> void:
 					result = {"ok": false, "message": str(finalized.get("message", "Falha ao atualizar o cadastro local."))}
 				else:
 					result["local"] = finalized
-					var firebase_result := await _ensure_firebase_modification_saved(serial, finalized.get("product", {}) as Dictionary)
-					if not bool(firebase_result.get("ok", false)):
+					var local_database_result := await _ensure_local_database_modification_saved(serial, finalized.get("product", {}) as Dictionary)
+					if not bool(local_database_result.get("ok", false)):
 						result = {
 							"ok": false,
-							"message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao do cadastro.")),
-							"firebase_pending": true,
+							"message": str(local_database_result.get("message", "O Banco local SQL nao confirmou a gravacao do cadastro.")),
+							"local_database_pending": true,
 						}
 					else:
-						result["firebase"] = firebase_result
+						result["local_database"] = local_database_result
 		# A ramificação antiga não pode cair adiante e gravar um cadastro sem a
-		# barreira Firebase. A partir daqui o resultado já representa o estado
+		# barreira Banco local SQL. A partir daqui o resultado já representa o estado
 		# final seguro do cadastro.
 		pass
 	else:
@@ -48187,9 +47048,9 @@ func legacy_run_remote_operation_job(job: Dictionary) -> void:
 			if not bool(finalized_modification.get("ok", false)):
 				result = {"ok": false, "message": str(finalized_modification.get("message", "Falha ao atualizar o cadastro local."))}
 			else:
-				var firebase_result := await _ensure_firebase_modification_saved(serial, finalized_modification.get("product", {}) as Dictionary)
-				if not bool(firebase_result.get("ok", false)):
-					result = {"ok": false, "message": str(firebase_result.get("message", "O Firebase nao confirmou a gravacao da modificacao.")), "firebase_pending": true}
+				var local_database_result := await _ensure_local_database_modification_saved(serial, finalized_modification.get("product", {}) as Dictionary)
+				if not bool(local_database_result.get("ok", false)):
+					result = {"ok": false, "message": str(local_database_result.get("message", "O Banco local SQL nao confirmou a gravacao da modificacao.")), "local_database_pending": true}
 	if bool(result.get("confirmation_pending", false)) and not bool(result.get("ok", false)):
 		var pending_message := str(result.get("message", "A API aceitou a operacao, mas a confirmacao ainda esta pendente."))
 		_remote_queue_finish(queue_id, false, pending_message, "API", "pending")
@@ -48212,6 +47073,32 @@ func legacy_run_remote_operation_job(job: Dictionary) -> void:
 		_log_system_action("Operacao remota concluida", "%s | Serie: %s" % [kind, serial], serial)
 	else:
 		var message := str(result.get("message", "A operacao remota nao foi confirmada."))
-		_remote_queue_finish(queue_id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API", "pending" if bool(result.get("firebase_pending", false)) else "")
+		_remote_queue_finish(queue_id, false, message, "Fallback web" if bool(result.get("fallback_web", false)) else "API", "pending" if bool(result.get("local_database_pending", false)) else "")
 		_log_system_action("Falhou operacao remota", "%s | Serie: %s" % [message, serial], serial)
 	_drain_remote_operation_queue()
+
+
+func _sga_setting_key(_source: String, _suffix: String) -> String:
+	return ""
+func _sga_source_label(_source: String) -> String:
+	return "SGA desativado"
+func _sga_client_key(_client_name: String) -> String:
+	return ""
+func _sga_product_cache_key(_product: Dictionary) -> String:
+	return ""
+func _sga_source_configured(_source: String) -> bool:
+	return false
+func _sga_search_is_active() -> bool:
+	return false
+func _schedule_sga_status_for_products(_products: Array[Dictionary]) -> void:
+	pass
+func _make_sga_status_strip(_product: Dictionary) -> Control:
+	return Control.new()
+func _lookup_sga_status_by_customer(_customer_name: String) -> Dictionary:
+	return {"ok": false, "state": "disabled", "message": "SGA removido."}
+func _sga_result_text(_source: String, _result: Dictionary) -> String:
+	return "SGA desativado"
+func _sga_result_color(_result: Dictionary) -> Color:
+	return MUTED
+func _sga_http_post_json(_url: String, _value: Variant, _headers: PackedStringArray, _timeout_seconds: float = 0.0) -> Dictionary:
+	return {"ok": false, "state": "disabled", "message": "SGA removido."}

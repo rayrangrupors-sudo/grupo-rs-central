@@ -21,8 +21,6 @@ var _send_button: Button
 var _stop_button: Button
 var _clear_button: Button
 var _auto_mode_button: Button
-var _gemini_mode_button: Button
-var _route_button_group := ButtonGroup.new()
 var _mode_label: Label
 var _processing_row: HBoxContainer
 var _processing_label: Label
@@ -176,23 +174,10 @@ func _build_route_selector() -> Control:
 	selector.add_theme_constant_override("separation", 2)
 
 	_auto_mode_button = _button("Automatico", COLOR_BLUE_LIGHT, COLOR_NAVY, Vector2(104, 40))
-	_auto_mode_button.toggle_mode = true
-	_auto_mode_button.button_group = _route_button_group
-	_auto_mode_button.button_pressed = true
-	_auto_mode_button.tooltip_text = "Prioriza respostas locais e usa o Gemini quando a pergunta exige analise."
-	_auto_mode_button.add_theme_stylebox_override("pressed", _style(COLOR_NAVY, COLOR_NAVY, 1, 7))
-	_auto_mode_button.add_theme_color_override("font_pressed_color", Color.WHITE)
-	_auto_mode_button.pressed.connect(_select_route_mode.bind("auto"))
+	_auto_mode_button.toggle_mode = false
+	_auto_mode_button.disabled = true
+	_auto_mode_button.tooltip_text = "Nesta versao a Luna opera somente em modo local."
 	selector.add_child(_auto_mode_button)
-
-	_gemini_mode_button = _button("Gemini", COLOR_BLUE_LIGHT, COLOR_NAVY, Vector2(82, 40))
-	_gemini_mode_button.toggle_mode = true
-	_gemini_mode_button.button_group = _route_button_group
-	_gemini_mode_button.tooltip_text = "Envia a proxima pergunta ao Gemini quando a conexao e a chave estiverem disponiveis."
-	_gemini_mode_button.add_theme_stylebox_override("pressed", _style(COLOR_BLUE, COLOR_BLUE, 1, 7))
-	_gemini_mode_button.add_theme_color_override("font_pressed_color", Color.WHITE)
-	_gemini_mode_button.pressed.connect(_select_route_mode.bind("gemini"))
-	selector.add_child(_gemini_mode_button)
 	return selector
 
 
@@ -227,7 +212,7 @@ func _seed_conversation() -> void:
 	else:
 		_add_message(
 			"luna",
-			"Ola. Posso consultar o GRUPO RS CENTRAL localmente e usar o Gemini apenas quando voce autorizar e a pergunta exigir uma analise avancada."
+			"Ola. Posso consultar o GRUPO RS CENTRAL localmente nesta versao."
 		)
 
 
@@ -246,8 +231,6 @@ func _submit_message() -> void:
 		_set_busy(false)
 		return
 	var options := {"current_page": _current_page}
-	if _route_mode == "gemini":
-		options["force_online"] = true
 	var result: Variant = await _manager.call("ask", question, options)
 	if not is_inside_tree():
 		return
@@ -301,9 +284,9 @@ func _add_message(
 
 	if not is_user and source_mode != "":
 		var source := Label.new()
-		source.text = "GEMINI" if source_mode == "online" else "LOCAL"
+		source.text = "LOCAL"
 		source.add_theme_font_size_override("font_size", 10)
-		source.add_theme_color_override("font_color", COLOR_BLUE if source_mode == "online" else COLOR_GREEN)
+		source.add_theme_color_override("font_color", COLOR_GREEN)
 		content.add_child(source)
 
 	var label := Label.new()
@@ -353,7 +336,7 @@ func _use_suggestion(text: String) -> void:
 
 
 func _select_route_mode(mode: String) -> void:
-	_route_mode = mode
+	_route_mode = "auto"
 	_refresh_mode()
 
 
@@ -370,7 +353,7 @@ func _clear_conversation() -> void:
 func _cancel_request() -> void:
 	if _manager != null and is_instance_valid(_manager):
 		_manager.call("cancel_online_request")
-	_add_message("luna", "A solicitacao online foi interrompida. O modo local continua disponivel.")
+	_add_message("luna", "A operacao em andamento foi interrompida. O modo local continua disponivel.")
 	_set_busy(false)
 
 
@@ -380,7 +363,6 @@ func _set_busy(value: bool) -> void:
 	_send_button.disabled = value
 	_clear_button.disabled = value
 	_auto_mode_button.disabled = value
-	_gemini_mode_button.disabled = value
 	_stop_button.visible = value
 	_processing_row.visible = value
 	if value:
@@ -418,20 +400,8 @@ func _refresh_mode() -> void:
 	if typeof(status) != TYPE_DICTIONARY:
 		return
 	var state := status as Dictionary
-	var status_mode := str(state.get("mode", "local"))
-	if not _busy and _route_mode == "gemini":
-		if bool(state.get("online_enabled", false)) and bool(state.get("key_configured", false)):
-			_mode_label.text = "Gemini ativado para esta conversa"
-			status_mode = "online"
-		else:
-			_mode_label.text = "Gemini indisponivel - resposta local"
-			status_mode = "configuration_required"
-	else:
-		_mode_label.text = str(state.get("message", "Luna Local"))
-	_mode_label.add_theme_color_override(
-		"font_color",
-		COLOR_BLUE if status_mode in ["online", "hybrid"] else (COLOR_RED if status_mode == "configuration_required" else COLOR_GREEN)
-	)
+	_mode_label.text = "Luna Local"
+	_mode_label.add_theme_color_override("font_color", COLOR_RED if str(state.get("mode", "local")) == "disabled" else COLOR_GREEN)
 
 
 func _show_inline_error(message: String) -> void:

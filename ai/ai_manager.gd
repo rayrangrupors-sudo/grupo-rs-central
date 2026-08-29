@@ -11,7 +11,6 @@ const SanitizerScript := preload("res://ai/ai_sanitizer.gd")
 const CacheScript := preload("res://ai/ai_cache.gd")
 const ContextScript := preload("res://ai/ai_context_provider.gd")
 const LocalAssistantScript := preload("res://ai/local_assistant.gd")
-const GeminiClientScript := preload("res://ai/gemini_client.gd")
 const MonitorScript := preload("res://ai/ai_system_monitor.gd")
 
 const USAGE_PATH := "user://luna_ai_usage.json"
@@ -31,7 +30,6 @@ var sanitizer: AISanitizer
 var cache: AICache
 var context_provider: AIContextProvider
 var local_assistant: LocalAssistant
-var gemini_client: GeminiClient
 var system_monitor: AISystemMonitor
 
 var _history: Array[Dictionary] = []
@@ -51,8 +49,6 @@ func _ready() -> void:
 	context_provider.setup(settings)
 	local_assistant = LocalAssistantScript.new()
 	local_assistant.setup(context_provider)
-	gemini_client = GeminiClientScript.new()
-	add_child(gemini_client)
 	system_monitor = MonitorScript.new()
 	add_child(system_monitor)
 	system_monitor.setup(context_provider, settings)
@@ -104,25 +100,13 @@ func ask(question: String, options: Dictionary = {}) -> Dictionary:
 	if bool(settings.get_value("local_ai_enabled", true)):
 		local_result = local_assistant.answer(question)
 
-	var force_online := bool(options.get("force_online", false))
-	var online_needed := force_online or local_assistant.should_use_online(question, local_result)
-	if bool(local_result.get("handled", false)) and not online_needed:
-		var local_response := _build_local_response(local_result)
-		_record_exchange(question, str(local_response.get("text", "")))
-		return _complete_result(local_response, started_at, question.length(), false)
-
-	if not _online_allowed():
-		var offline_response := _offline_fallback(local_result)
-		_record_exchange(question, str(offline_response.get("text", "")))
-		return _complete_result(offline_response, started_at, question.length(), false)
-
 	var sanitized_question := sanitizer.sanitize_text(question, int(settings.get_value("max_prompt_chars", 6000)))
 	if bool(sanitized_question.get("blocked", false)):
 		var privacy_response := {
 			"ok": true,
 			"mode": "local",
 			"intent": "privacy_protection",
-			"text": "Por seguranca, nao enviei esta mensagem para a IA online porque ela parece conter uma credencial. Remova senhas, tokens ou chaves e tente novamente.",
+			"text": "Por seguranca, esta versao opera somente em modo local. Remova dados sensiveis e tente novamente.",
 			"actions": [],
 			"privacy_blocked": true,
 		}
@@ -131,101 +115,20 @@ func ask(question: String, options: Dictionary = {}) -> Dictionary:
 		_record_exchange(question, str(privacy_response.get("text", "")))
 		return _complete_result(privacy_response, started_at, int(sanitized_question.get("sanitized_chars", 0)), false)
 
-	var raw_context := context_provider.get_controlled_context(question)
-	var safe_context := sanitizer.sanitize_dictionary(raw_context, int(settings.get_value("max_prompt_chars", 6000)))
-	var safe_history := sanitizer.sanitize_history(
-		_history,
-		int(settings.get_value("max_history_messages", 20)),
-		int(settings.get_value("max_prompt_chars", 6000))
-	)
-	var model := str(settings.get_value("model", AISettings.DEFAULT_MODEL))
-	var cache_key := cache.make_key(str(sanitized_question.get("text", "")), safe_context, model)
-	var cached := cache.get_value(cache_key)
-	if bool(cached.get("hit", false)):
-		var cached_result: Dictionary = (cached.get("value", {}) as Dictionary).duplicate(true)
-		cached_result["cached"] = true
-		_record_exchange(question, str(cached_result.get("text", "")))
-		return _complete_result(cached_result, started_at, int(sanitized_question.get("sanitized_chars", 0)), true)
-
-	var limit_status := _check_usage_limit()
-	if not bool(limit_status.get("ok", false)):
-		var limit_response := _offline_fallback(local_result)
-		limit_response["error"] = str(limit_status.get("error", "rate_limit"))
-		limit_response["text"] = "O limite temporario da IA online foi atingido. A Luna continuara operando no modo local."
-		if bool(local_result.get("handled", false)):
-			limit_response["text"] += "\n\n%s" % str(local_result.get("text", ""))
-		_record_exchange(question, str(limit_response.get("text", "")))
-		return _complete_result(limit_response, started_at, int(sanitized_question.get("sanitized_chars", 0)), false)
-
-	_current_mode = "online"
-	_emit_mode()
-	request_started.emit("online")
-	var online_result := await gemini_client.send_message(
-		str(sanitized_question.get("text", "")),
-		safe_context,
-		safe_history,
-		str(settings.get_value("gemini_api_key", "")),
-		model
-	)
-	if bool(online_result.get("ok", false)):
-		_increment_usage()
-		var safe_answer := sanitizer.sanitize_text(str(online_result.get("text", "")), 12000)
-		var response := {
-			"ok": true,
-			"mode": "online",
-			"intent": "gemini",
-			"text": str(safe_answer.get("text", "")),
-			"actions": [],
-			"cached": false,
-			"model_used": str(online_result.get("model_used", model)),
-		}
-		cache.put(cache_key, response.duplicate(true))
-		_record_exchange(question, str(response.get("text", "")))
-		_current_mode = "local"
-		_emit_mode()
-		return _complete_result(response, started_at, int(sanitized_question.get("sanitized_chars", 0)), false)
-
-	var fallback := _offline_fallback(local_result)
-	fallback["error"] = str(online_result.get("error", "online_error"))
-	if str(online_result.get("error", "")) == "rate_limit":
-		fallback["text"] = "O limite temporario da IA online foi atingido. A Luna continuara operando no modo local."
-	else:
-		fallback["text"] = "O modo online esta indisponivel no momento. Continuarei ajudando usando os recursos locais do sistema."
-	if bool(local_result.get("handled", false)):
-		fallback["text"] += "\n\n%s" % str(local_result.get("text", ""))
-	_current_mode = "local"
-	_emit_mode()
-	_record_exchange(question, str(fallback.get("text", "")))
-	return _complete_result(fallback, started_at, int(sanitized_question.get("sanitized_chars", 0)), false)
+	var local_response := _build_local_response(local_result)
+	if not bool(local_result.get("handled", false)):
+		local_response["text"] = "A Luna opera somente no modo local nesta versao."
+		if question.strip_edges() != "":
+			local_response["text"] += "\n\nPergunta recebida: %s" % question.strip_edges()
+	_record_exchange(question, str(local_response.get("text", "")))
+	return _complete_result(local_response, started_at, int(sanitized_question.get("sanitized_chars", 0)), false)
 
 
 func test_connection() -> Dictionary:
-	if _request_busy:
-		return {"ok": false, "error": "busy", "message": "A Luna esta ocupada."}
-	_request_busy = true
-	_current_mode = "online"
-	_emit_mode()
-	var started_at := Time.get_ticks_msec()
-	var result := await gemini_client.test_connection(
-		str(settings.get_value("gemini_api_key", "")),
-		str(settings.get_value("model", AISettings.DEFAULT_MODEL))
-	)
-	_request_busy = false
-	_current_mode = "local"
-	_emit_mode()
-	_write_technical_log(
-		"connection_test",
-		bool(result.get("ok", false)),
-		Time.get_ticks_msec() - started_at,
-		str(result.get("error", "")),
-		0,
-		false
-	)
-	return result
+	return {"ok": false, "error": "disabled", "message": "A analise online foi desativada nesta versao. O assistente opera somente em modo local."}
 
 
 func cancel_online_request() -> void:
-	gemini_client.cancel_request()
 	_request_busy = false
 	_current_mode = "local"
 	_emit_mode()
@@ -268,29 +171,15 @@ func get_history() -> Array[Dictionary]:
 
 
 func get_mode_status() -> Dictionary:
-	var key_configured := str(settings.get_value("gemini_api_key", "")).strip_edges() != ""
-	var online_enabled := bool(settings.get_value("gemini_enabled", false)) and bool(settings.get_value("allow_online_analysis", false))
 	var mode := "local"
 	var message := "Luna Local"
-	if _current_mode == "online" and _request_busy:
-		mode = "online"
-		message = "Luna Online - Gemini"
-	elif online_enabled and not key_configured:
-		mode = "configuration_required"
-		message = "Configuracao necessaria"
-	elif not bool(settings.get_value("local_ai_enabled", true)):
+	if not bool(settings.get_value("local_ai_enabled", true)):
 		mode = "disabled"
 		message = "Luna desativada"
-	elif online_enabled and key_configured:
-		mode = "hybrid"
-		message = "Luna Hibrida - Automatico"
 	return {
 		"mode": mode,
 		"message": message,
 		"busy": _request_busy,
-		"online_enabled": online_enabled,
-		"key_configured": key_configured,
-		"api_key_source": settings.api_key_source(),
 		"cache_entries": cache.size(),
 	}
 
@@ -320,20 +209,12 @@ func safe_actions(actions: Variant) -> Array[Dictionary]:
 	return result
 
 
-func set_test_transport(transport: Callable) -> void:
-	gemini_client.set_test_transport(transport)
+func set_test_transport(_transport: Callable) -> void:
+	pass
 
 
 func clear_test_transport() -> void:
-	gemini_client.clear_test_transport()
-
-
-func _online_allowed() -> bool:
-	return (
-		bool(settings.get_value("gemini_enabled", false))
-		and bool(settings.get_value("allow_online_analysis", false))
-		and str(settings.get_value("gemini_api_key", "")).strip_edges() != ""
-	)
+	pass
 
 
 func _build_local_response(local_result: Dictionary) -> Dictionary:
@@ -353,7 +234,7 @@ func _offline_fallback(local_result: Dictionary) -> Dictionary:
 		"ok": true,
 		"mode": "local",
 		"intent": "offline_fallback",
-		"text": "O modo online esta indisponivel no momento. Continuarei ajudando usando os recursos locais do sistema.\n\nNao encontrei dados suficientes no sistema para responder com seguranca.",
+		"text": "A Luna opera somente em modo local nesta versao.\n\nNao encontrei dados suficientes no sistema para responder com seguranca.",
 		"actions": [],
 	}
 

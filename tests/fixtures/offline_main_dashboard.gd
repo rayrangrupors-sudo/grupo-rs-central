@@ -26,7 +26,7 @@ func _register_runtime_integrations() -> void:
 	pass
 
 
-func _firebase_sync() -> Node:
+func _local_database_sync() -> Node:
 	offline_external_calls += 1
 	return null
 

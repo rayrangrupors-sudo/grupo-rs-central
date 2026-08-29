@@ -27,7 +27,7 @@ Não foram executados login, `/auth/me`, pesquisa autenticada, paginação de ve
 - pan/zoom solicita somente chaves OSM ausentes e reutiliza bytes/texturas;
 - marcadores de veículo verde, vermelho e amarelo e marcadores de ERB separados;
 - estados sem dados, sem posição e erro de fonte sem criar pontos fictícios;
-- Estoque, navegação e Sair em fixture offline que bloqueia HTTP, API, SGA e Firebase.
+- Estoque, navegação e Sair em fixture offline que bloqueia HTTP, API, SGA e BancoLocalSQL.
 
 ## Fonte e índice Anatel
 

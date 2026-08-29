@@ -3,7 +3,7 @@ extends RefCounted
 
 signal database_saved(snapshot: Dictionary, db_path: String)
 
-const DEFAULT_DB_PATH := "user://inventory_db.json"
+const DEFAULT_DB_PATH := "C:/GRUPO RS CENTRAL/database/grupo_rs_central.sqlite"
 const DEFAULT_LEGACY_PATH := "user://rastreadores.json"
 const CLOUD_BACKUP_DIR_NAME := "Grupo RS Central"
 const DEFAULT_CLOUD_BACKUP_FILE_NAME := "inventory_db.json"
@@ -14,6 +14,8 @@ const MAX_SYSTEM_LOGS := 1000
 const SYSTEM_LOG_PRUNE_BATCH := 10
 const SYSTEM_LOG_SCHEMA_VERSION := 2
 const MAX_PENDING_SYNC_RECORDS := 10
+const AUTOMATIC_BACKUP_RETENTION := 30
+const AUTOMATIC_BACKUP_ROOT_NAME := "backups"
 const INTERNAL_STOCK_PLATE_PREFIXES := ["GRS", "XRS", "AAA", "NOV"]
 
 var _db: Dictionary = {}
@@ -27,32 +29,49 @@ var _online_only := true
 var _remote_available := false
 var _pending_sync_path := ""
 var _pending_sync_queue: Array[Dictionary] = []
+var _branch_id := "imperatriz"
+var _sqlite := LocalSQLiteBridge.new()
 
 
 func configure(db_path: String, cloud_backup_file_name: String = "", local_backup_dir: String = "", migrate_legacy: bool = false) -> void:
-	_db_path = db_path if db_path.strip_edges() != "" else DEFAULT_DB_PATH
+	_db_path = DEFAULT_DB_PATH
 	_cloud_backup_file_name = cloud_backup_file_name if cloud_backup_file_name.strip_edges() != "" else _db_path.get_file()
 	_local_backup_dir = local_backup_dir if local_backup_dir.strip_edges() != "" else DEFAULT_LOCAL_BACKUP_DIR
+	_branch_id = _local_backup_dir.get_file().to_lower().strip_edges()
+	if _branch_id == "" or _branch_id == "backups":
+		_branch_id = "imperatriz"
 	_migrate_legacy = migrate_legacy
 	_db = _empty_db()
 	_loaded = false
-	_online_only = true
-	_remote_available = false
+	_online_only = false
+	_remote_available = true
 	_pending_sync_path = "%s.pending.json" % _db_path
 	_pending_sync_queue = _read_pending_sync_queue()
+
+
+func configure_isolated_sqlite_for_testing(db_path: String, branch_id: String = "imperatriz") -> void:
+	# Entrada explicita para testes: evita que qualquer cenario automatizado toque
+	# no banco operacional. Nao e usada pelo fluxo normal do aplicativo.
+	_db_path = db_path.strip_edges()
+	_branch_id = branch_id.strip_edges().to_lower()
+	if _branch_id == "":
+		_branch_id = "imperatriz"
+	_migrate_legacy = false
+	_db = _empty_db()
+	_loaded = false
+	_online_only = false
+	_remote_available = true
+	_pending_sync_path = "%s.pending.json" % _db_path
+	_pending_sync_queue.clear()
 
 
 func load_db() -> Dictionary:
 	if _loaded:
 		return _db
 
-	if _online_only:
-		_db = _empty_db()
-		_loaded = true
-		return _db
-
-	if FileAccess.file_exists(_db_path):
-		_db = _read_db_file(_db_path)
+	var loaded := _sqlite.execute("load", _db_path, {"branch": _branch_id})
+	if bool(loaded.get("ok", false)):
+		_db = _ensure_db_shape(loaded.get("snapshot", {}))
 	elif _migrate_legacy and FileAccess.file_exists(_legacy_path):
 		_db = _ensure_db_shape(_migrate_legacy_db(_read_legacy_array(_legacy_path)))
 		_loaded = true
@@ -67,40 +86,68 @@ func load_db() -> Dictionary:
 
 
 func save_db(notify_remote_sync: bool = true) -> bool:
-	if _online_only:
-		if not _remote_available:
-			if not _queue_pending_sync_snapshot(_db):
-				return false
-		if notify_remote_sync:
-			database_saved.emit(_ensure_db_shape(_db.duplicate(true)), _db_path)
-		return true
-
 	if not _loaded and _db.is_empty():
 		load_db()
-
-	var temp_path := "%s.tmp" % _db_path
-	var backup_path := "%s.bak" % _db_path
-	var file := FileAccess.open(temp_path, FileAccess.WRITE)
-	if file == null:
+	var saved := _sqlite.execute("save", _db_path, {"branch": _branch_id, "snapshot": _ensure_db_shape(_db)})
+	if not bool(saved.get("ok", false)):
 		return false
-
-	file.store_string(JSON.stringify(_db, "\t"))
-	file = null
-
-	if not _replace_file_atomically(temp_path, _db_path, backup_path):
-		return false
-
-	sync_cloud_backup()
 	if notify_remote_sync:
-		database_saved.emit({}, _db_path)
+		database_saved.emit(_ensure_db_shape(_db.duplicate(true)), _db_path)
 	return true
+
+
+func verify_product_persisted(serial: String, expected_product: Dictionary = {}) -> Dictionary:
+	# Leitura nova e independente do arquivo SQLite. Nunca usa apenas o cache em
+	# memoria para afirmar ao operador que uma gravacao foi concluida.
+	var loaded := _sqlite.execute("get_device", _db_path, {"branch": _branch_id, "sku": _normalize_sku(serial)})
+	if not bool(loaded.get("ok", false)) or not bool(loaded.get("found", false)):
+		return {"ok": false, "found": false, "message": "Falha ao reler o arquivo SQLite: %s" % _sqlite.last_error}
+	var wanted := _normalize_sku(serial)
+	if wanted == "" and not expected_product.is_empty():
+		wanted = _normalize_sku(expected_product.get("sku", expected_product.get("imei", "")))
+	var persisted := _normalize_product(loaded.get("product", {}) as Dictionary)
+	if persisted.is_empty():
+		return {"ok": false, "found": false, "matches": false, "message": "O registro nao foi encontrado ao reler o SQLite."}
+	if expected_product.is_empty():
+		return {"ok": true, "found": true, "matches": true, "product": persisted, "source": "sqlite_disk"}
+	var expected := _normalize_product(expected_product)
+	var mismatches: Array[String] = []
+	for field in ["sku", "imei", "chip_number", "plate", "identification_plate", "vehicle_plate", "model", "operator", "tracker_status", "stock"]:
+		if str(persisted.get(field, "")) != str(expected.get(field, "")):
+			mismatches.append(str(field))
+	if not mismatches.is_empty():
+		return {
+			"ok": false,
+			"found": true,
+			"matches": false,
+			"mismatches": mismatches,
+			"product": persisted,
+			"message": "O SQLite foi relido, mas os campos nao conferem: %s." % ", ".join(mismatches),
+		}
+	return {"ok": true, "found": true, "matches": true, "product": persisted, "source": "sqlite_disk"}
+
+
+func _persist_product_incremental(product: Dictionary, old_sku: String = "") -> bool:
+	var result := _sqlite.execute("upsert_device", _db_path, {
+		"branch": _branch_id,
+		"product": product,
+		"old_sku": _normalize_sku(old_sku),
+	})
+	return bool(result.get("ok", false)) and bool(result.get("found", false))
+
+
+func _persist_product_with_movement_incremental(product: Dictionary, movement: Dictionary) -> bool:
+	var result := _sqlite.execute("upsert_device_with_movement", _db_path, {
+		"branch": _branch_id,
+		"product": product,
+		"movement": movement,
+	})
+	return bool(result.get("ok", false)) and bool(result.get("found", false))
 
 
 func get_sync_snapshot() -> Dictionary:
 	if not _loaded:
 		load_db()
-	if _online_only and not _remote_available:
-		return {}
 	return _ensure_db_shape(_db.duplicate(true))
 
 
@@ -140,7 +187,61 @@ func replace_from_remote(snapshot: Dictionary) -> bool:
 	_loaded = true
 	_remote_available = true
 	purge_legacy_operational_files()
+	_write_automatic_remote_backup(_db)
 	return true
+
+
+func _write_automatic_remote_backup(snapshot: Dictionary) -> void:
+	if snapshot.is_empty():
+		return
+	var backup_dir := _automatic_backup_dir()
+	if not DirAccess.dir_exists_absolute(backup_dir):
+		if DirAccess.make_dir_recursive_absolute(backup_dir) != OK:
+			return
+	# Um arquivo por filial e por dia evita uma pilha de cópias a cada refresh;
+	# o conteúdo é sempre o último snapshot remoto confirmado daquele dia.
+	var stamp := Time.get_date_string_from_system()
+	var path := backup_dir.path_join("inventory_auto_%s.json" % stamp)
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		return
+	file.store_string(JSON.stringify({
+		"schema": SCHEMA_VERSION,
+		"created_at": Time.get_datetime_string_from_system(false, true),
+		"source": "local_database",
+		"branch_backup": _local_backup_dir.get_file(),
+		"snapshot": _ensure_db_shape(snapshot),
+	}, "\t"))
+	file = null
+	var files: Array[String] = []
+	var dir := DirAccess.open(backup_dir)
+	if dir == null:
+		return
+	dir.list_dir_begin()
+	var name := dir.get_next()
+	while name != "":
+		if not dir.current_is_dir() and name.begins_with("inventory_auto_") and name.ends_with(".json"):
+			files.append(backup_dir.path_join(name))
+		name = dir.get_next()
+	dir.list_dir_end()
+	files.sort()
+	while files.size() > AUTOMATIC_BACKUP_RETENTION:
+		DirAccess.remove_absolute(files.pop_front())
+
+
+func get_automatic_backup_dir() -> String:
+	return _automatic_backup_dir()
+
+
+func get_automatic_backup_status() -> Dictionary:
+	var dir := _automatic_backup_dir()
+	var latest := _latest_backup_file(dir)
+	return {
+		"directory": dir,
+		"latest": latest,
+		"exists": latest != "",
+		"retention_days": AUTOMATIC_BACKUP_RETENTION,
+	}
 
 
 func mark_remote_unavailable() -> void:
@@ -155,7 +256,7 @@ func is_remote_available() -> bool:
 
 
 func is_online_only() -> bool:
-	return _online_only
+	return false
 
 
 func purge_legacy_operational_files() -> void:
@@ -180,66 +281,44 @@ func purge_legacy_operational_files() -> void:
 
 
 func export_manual_backup() -> String:
-	if _online_only:
-		return ""
 	if not _loaded:
 		load_db()
-
-	var backup_dir := _manual_backup_dir()
-	if not DirAccess.dir_exists_absolute(backup_dir):
-		var make_error := DirAccess.make_dir_recursive_absolute(backup_dir)
-		if make_error != OK:
-			return ""
-
-	var path := backup_dir.path_join("inventory_backup_%s.json" % _file_stamp())
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	if file == null:
+	if not save_db(false):
 		return ""
-	file.store_string(JSON.stringify(_db, "\t"))
-	file = null
-	return path
+	var result := _sqlite.execute("backup", _db_path, {
+		"backup_dir": _automatic_backup_dir(),
+		"app_version": str(ProjectSettings.get_setting("application/config/version", "unknown")),
+	})
+	return str(result.get("path", "")) if bool(result.get("ok", false)) else ""
 
 
-func restore_backup(path: String) -> bool:
-	if _online_only:
-		return false
+func restore_backup(path: String, confirmation: String = "") -> bool:
 	var clean_path := path.strip_edges()
 	if clean_path == "" or not FileAccess.file_exists(clean_path):
 		return false
-
-	var raw_backup := _read_json_dictionary(clean_path)
-	if not _is_valid_db_backup(raw_backup):
+	var result := _sqlite.execute("restore", _db_path, {
+		"path": clean_path,
+		"confirmation": confirmation,
+		"operator": "lucasabm",
+	})
+	if not bool(result.get("ok", false)):
 		return false
-
-	_db = _ensure_db_shape(raw_backup)
-	_loaded = true
-	return save_db()
+	_loaded = false
+	load_db()
+	return true
 
 
 func inspect_backup(path: String) -> Dictionary:
-	if _online_only:
-		return {"valid": false, "message": "O sistema usa somente a base online do Firebase."}
 	var clean_path := path.strip_edges()
 	if clean_path == "" or not FileAccess.file_exists(clean_path):
 		return {"valid": false, "message": "Arquivo nao encontrado."}
-
-	var raw_backup := _read_json_dictionary(clean_path)
-	if not _is_valid_db_backup(raw_backup):
-		return {"valid": false, "message": "Backup JSON invalido ou incompativel."}
-
-	var normalized := _ensure_db_shape(raw_backup)
-	return {
-		"valid": true,
-		"schema": int(normalized.get("schema", 0)),
-		"products": (normalized.get("products", []) as Array).size(),
-		"movements": (normalized.get("movements", []) as Array).size(),
-		"system_logs": (normalized.get("system_logs", []) as Array).size(),
-		"maintenances": (normalized.get("maintenances", []) as Array).size(),
-	}
+	var result := _sqlite.execute("inspect", _db_path, {"path": clean_path})
+	result["valid"] = bool(result.get("ok", false))
+	return result
 
 
 func get_local_backup_dir() -> String:
-	return _manual_backup_dir()
+	return _automatic_backup_dir()
 
 
 func get_db_path() -> String:
@@ -255,8 +334,8 @@ func get_system_health() -> Dictionary:
 		load_db()
 
 	return {
-		"storage_mode": "Firebase online",
-		"remote_available": _remote_available,
+		"storage_mode": "SQLite local / offline-first",
+		"remote_available": true,
 		"products": (_db.get("products", []) as Array).size(),
 		"movements": (_db.get("movements", []) as Array).size(),
 		"system_logs": (_db.get("system_logs", []) as Array).size(),
@@ -311,6 +390,16 @@ func _manual_backup_dir() -> String:
 	if downloads.strip_edges() != "":
 		return downloads.path_join("Grupo RS Central Backups")
 	return ProjectSettings.globalize_path(_local_backup_dir)
+
+
+func _automatic_backup_dir() -> String:
+	var base_dir := ProjectSettings.globalize_path("res://").trim_suffix("/").trim_suffix("\\")
+	if not OS.has_feature("editor"):
+		base_dir = OS.get_executable_path().get_base_dir()
+	var branch_name := _local_backup_dir.get_file().strip_edges()
+	if branch_name == "":
+		branch_name = "default"
+	return base_dir.path_join(AUTOMATIC_BACKUP_ROOT_NAME).path_join(branch_name)
 
 
 func _backup_db_to_cloud() -> bool:
@@ -460,7 +549,7 @@ func get_product(sku: String) -> Dictionary:
 
 func ingest_st310_packet(raw_packet: Variant, received_at: String = "") -> Dictionary:
 	## Persiste um pacote bruto ST310 sem consultar a API de localizacao.
-	## A serie precisa estar associada a um produto local/Firebase existente;
+	## A serie precisa estar associada a um produto local/Banco local SQL existente;
 	## nenhum cadastro e criado automaticamente por telemetria.
 	if not _can_mutate():
 		return {"ok": false, "retryable": true, "message": "Armazenamento operacional indisponivel."}
@@ -492,7 +581,7 @@ func ingest_st310_packet(raw_packet: Variant, received_at: String = "") -> Dicti
 			"serial": serial,
 			"sku": str(product.get("sku", "")),
 			"decoded": decoded,
-			"storage": "firebase" if _remote_available else "pending_firebase",
+			"storage": "local_database" if _remote_available else "pending_local_database",
 			"message": "Pacote ST310 duplicado; nenhuma gravacao repetida foi feita.",
 		}
 	var previous_products := products.duplicate(true)
@@ -509,15 +598,15 @@ func ingest_st310_packet(raw_packet: Variant, received_at: String = "") -> Dicti
 	product["updated_at"] = stamp
 	products[product_index] = product
 	_db["products"] = products
-	if not save_db():
+	if not _persist_product_incremental(product):
 		_db["products"] = previous_products
-		return {"ok": false, "retryable": true, "message": "Firebase recusou o pacote ST310; alteracao preservada para nova tentativa.", "serial": serial}
+		return {"ok": false, "retryable": true, "message": "Banco local SQL recusou o pacote ST310; alteracao preservada para nova tentativa.", "serial": serial}
 	return {
 		"ok": true,
 		"serial": serial,
 		"sku": str(product.get("sku", "")),
 		"decoded": decoded,
-		"storage": "firebase" if _remote_available else "pending_firebase",
+		"storage": "local_database" if _remote_available else "pending_local_database",
 		"message": "Pacote ST310 armazenado e pronto para o mapa.",
 	}
 
@@ -821,7 +910,7 @@ func upsert_product_replacing_sku(old_sku: String, product_data: Dictionary) -> 
 		item["discharged_at"] = ""
 
 	_db["products"] = products
-	if not save_db():
+	if not _persist_product_incremental(item, old_sku):
 		_db["products"] = previous_products
 		return {}
 	return item
@@ -829,7 +918,7 @@ func upsert_product_replacing_sku(old_sku: String, product_data: Dictionary) -> 
 
 func commit_appliance_replacement_local(source_sku: String, target_sku: String, target_patch: Dictionary, source_patch: Dictionary, maintenance_row: Dictionary) -> Dictionary:
 	# Aplica as duas mudancas locais e a manutencao em uma unica gravacao.
-	# A troca remota pode ser confirmada antes do Firebase. Por isso a parte
+	# A troca remota pode ser confirmada antes do Banco local SQL. Por isso a parte
 	# local precisa ser atomica: nenhum aparelho fica parcialmente atualizado.
 	if not _can_mutate():
 		return {"ok": false, "message": "Servidor online indisponivel para confirmar a troca local."}
@@ -884,7 +973,7 @@ func commit_appliance_replacement_local(source_sku: String, target_sku: String, 
 
 	_db["products"] = previous_products
 	_db["maintenances"] = previous_maintenances
-	return {"ok": false, "message": "O Firebase recusou a gravacao atomica da troca local; os dois aparelhos foram preservados."}
+	return {"ok": false, "message": "O Banco local SQL recusou a gravacao atomica da troca local; os dois aparelhos foram preservados."}
 
 
 func find_duplicate_product(product_data: Dictionary, ignore_sku: String = "") -> Dictionary:
@@ -971,6 +1060,7 @@ func set_tracker_status(sku: String, status: String) -> bool:
 		return false
 
 	var products: Array = _db.get("products", [])
+	var previous_products := products.duplicate(true)
 	var product := _normalize_product(products[index])
 	var previous_status_key := _status_key(product)
 	var clean_status := status.strip_edges()
@@ -984,7 +1074,8 @@ func set_tracker_status(sku: String, status: String) -> bool:
 	product["active"] = next_status_key != "inativo"
 	product["stock"] = 1 if next_status_key == "estoque" else 0
 	if next_status_key == "estoque" and previous_status_key == "instalado":
-		product["plate"] = ""
+		product["vehicle_plate"] = ""
+		product["plate"] = str(product.get("identification_plate", ""))
 		product["installed_at"] = ""
 		product["discharged_at"] = ""
 	if next_status_key == "manutencao":
@@ -994,7 +1085,9 @@ func set_tracker_status(sku: String, status: String) -> bool:
 
 	products[index] = product
 	_db["products"] = products
-	save_db()
+	if not _persist_product_incremental(product):
+		_db["products"] = previous_products
+		return false
 	return true
 
 
@@ -1031,7 +1124,12 @@ func add_system_log_event(action: String, details: String = "", sku: String = ""
 	logs = _prune_system_logs(logs)
 
 	_db["system_logs"] = logs
-	return save_db()
+	var persisted := _sqlite.execute("append_audit", _db_path, {"branch": _branch_id, "event": event})
+	if not bool(persisted.get("ok", false)):
+		logs.erase(event)
+		_db["system_logs"] = logs
+		return false
+	return true
 
 
 func get_system_logs(limit: int = 300) -> Array[Dictionary]:
@@ -1152,7 +1250,12 @@ func get_product_history(sku: String, limit: int = 120) -> Array[Dictionary]:
 
 	_add_history_event(events, str(product.get("created_at", "")), "Cadastro", "Produto criado", normalized_sku)
 	_add_history_event(events, str(product.get("updated_at", "")), "Atualizacao", "Ultima alteracao do cadastro", normalized_sku)
-	_add_history_event(events, str(product.get("installed_at", "")), "Instalacao", "Instalado na placa %s" % str(product.get("plate", "")), normalized_sku)
+	var identification_plate := str(product.get("identification_plate", "")).strip_edges()
+	var vehicle_plate := str(product.get("vehicle_plate", product.get("plate", ""))).strip_edges()
+	var installation_details := "Instalado no veiculo %s" % vehicle_plate
+	if identification_plate != "":
+		installation_details = "Identificacao %s instalada no veiculo %s" % [identification_plate, vehicle_plate]
+	_add_history_event(events, str(product.get("installed_at", "")), "Instalacao", installation_details, normalized_sku)
 	_add_history_event(events, str(product.get("discharged_at", "")), "Baixa", "Baixa registrada", normalized_sku)
 
 	for movement in _db.get("movements", []):
@@ -1283,14 +1386,22 @@ func install_tracker(sku: String, plate: String) -> bool:
 	var products: Array = _db.get("products", [])
 	var previous_products := products.duplicate(true)
 	var product := _normalize_product(products[index])
+	if _status_key(product) == "instalado" and str(product.get("vehicle_plate", product.get("plate", ""))).strip_edges().to_upper() == clean_plate:
+		return true
 	var now := _now_string()
+	var identification_plate := str(product.get("identification_plate", "")).strip_edges().to_upper()
+	if identification_plate == "" and _status_key(product) != "instalado":
+		identification_plate = str(product.get("plate", "")).strip_edges().to_upper()
 
+	product["identification_plate"] = identification_plate
+	product["vehicle_plate"] = clean_plate
 	product["plate"] = clean_plate
 	product["tracker_status"] = "Instalado"
 	product["status"] = "Instalado"
 	product["location"] = "Instalado"
 	product["stock"] = 0
 	product["active"] = true
+	product["remote_registration_status"] = "local_database_pending"
 	product["installed_at"] = now
 	product["discharged_at"] = now
 	product["updated_at"] = now
@@ -1306,7 +1417,9 @@ func install_tracker(sku: String, plate: String) -> bool:
 		"type": "baixa",
 		"quantity": 1.0,
 		"delta": -1.0,
-		"reason": "Baixa para instalacao na placa %s" % clean_plate,
+		"reason": ("Baixa da identificacao %s para instalacao no veiculo %s" % [identification_plate, clean_plate]) if identification_plate != "" else ("Baixa para instalacao no veiculo %s" % clean_plate),
+		"identification_plate": identification_plate,
+		"vehicle_plate": clean_plate,
 		"timestamp": now,
 		"stock_after": 0,
 	}
@@ -1315,7 +1428,7 @@ func install_tracker(sku: String, plate: String) -> bool:
 	movements.append(movement)
 	_db["movements"] = movements
 
-	if not save_db():
+	if not _persist_product_with_movement_incremental(product, movement):
 		_db["products"] = previous_products
 		_db["movements"] = previous_movements
 		return false
@@ -1336,7 +1449,8 @@ func delete_product(sku: String) -> bool:
 	var previous_products := products.duplicate(true)
 	products.remove_at(index)
 	_db["products"] = products
-	if not save_db():
+	var deleted := _sqlite.execute("delete_device", _db_path, {"branch": _branch_id, "sku": _normalize_sku(sku)})
+	if not bool(deleted.get("ok", false)) or int(deleted.get("deleted", 0)) != 1:
 		_db["products"] = previous_products
 		return false
 	return true
@@ -1550,6 +1664,8 @@ func _normalize_movement_array(value) -> Array:
 			"quantity": float(entry.get("quantity", 0)),
 			"delta": float(entry.get("delta", 0)),
 			"reason": str(entry.get("reason", "")),
+			"identification_plate": str(entry.get("identification_plate", "")),
+			"vehicle_plate": str(entry.get("vehicle_plate", "")),
 			"timestamp": str(entry.get("timestamp", "")),
 			"stock_after": int(entry.get("stock_after", 0)),
 		})
@@ -1652,8 +1768,8 @@ func _infer_system_log_metadata(action: String, details: String, sku: String, pr
 	elif transport == "":
 		if joined.contains("api"):
 			transport = "api"
-		elif joined.contains("firebase"):
-			transport = "firebase"
+		elif joined.contains("local_database"):
+			transport = "local_database"
 		else:
 			transport = "local"
 	metadata["transport"] = transport
@@ -1664,7 +1780,7 @@ func _infer_system_log_metadata(action: String, details: String, sku: String, pr
 		match transport:
 			"api": origin = "API Grupo RS"
 			"web": origin = "Portal web"
-			"firebase": origin = "Firebase"
+			"local_database": origin = "Banco local SQL"
 			_: origin = "Sistema local"
 	metadata["origin"] = origin
 
@@ -1838,8 +1954,22 @@ func _normalize_product(value: Dictionary) -> Dictionary:
 	var tracker_status := _first_text(value, ["tracker_status", "status", "location"])
 	if tracker_status == "":
 		tracker_status = "Estoque"
+	var tracker_status_key := _status_key_from_text(tracker_status)
+	var identification_plate := _first_text(value, ["identification_plate", "original_plate", "tracker_plate", "placa_identificacao"])
+	var vehicle_plate := _first_text(value, ["vehicle_plate", "installed_vehicle_plate", "placa_veiculo"])
+	# Compatibilidade: uma placa de item ainda nao instalado era a identificacao
+	# usada no estoque. Para itens legados ja instalados, a placa existente e
+	# considerada apenas a placa do veiculo, sem inventar uma identificacao.
+	if identification_plate == "" and tracker_status_key != "instalado":
+		identification_plate = plate
+	if vehicle_plate == "" and tracker_status_key == "instalado":
+		vehicle_plate = plate
+	if tracker_status_key == "instalado" and vehicle_plate != "":
+		plate = vehicle_plate
+	elif identification_plate != "":
+		plate = identification_plate
 	var remote_registration_status := str(value.get("remote_registration_status", "")).strip_edges()
-	# Pacotes ST310 podem ser recebidos por uma ponte local/Firebase. Eles são
+	# Pacotes ST310 podem ser recebidos por uma ponte local/Banco local SQL. Eles são
 	# mantidos no cadastro para que o mapa possa decodificar a telemetria sem
 	# consultar a API de localização. Nenhuma coordenada é criada aqui.
 	var st310_raw_packet: Variant = value.get("st310_raw_packet", value.get("st310_packet", value.get("raw_packet", "")))
@@ -1917,6 +2047,8 @@ func _normalize_product(value: Dictionary) -> Dictionary:
 		"model": model,
 		"operator": operator_name,
 		"plate": plate,
+		"identification_plate": identification_plate,
+		"vehicle_plate": vehicle_plate,
 		"client": client,
 		"tracker_status": tracker_status,
 		"status": tracker_status,
@@ -2109,7 +2241,7 @@ func _write_pending_sync_queue() -> bool:
 
 
 func _can_mutate() -> bool:
-	return not _online_only or _remote_available or _pending_sync_queue.size() < MAX_PENDING_SYNC_RECORDS
+	return true
 
 
 func _find_product_index_by_st310_serial(products: Array, serial: String) -> int:
@@ -2305,6 +2437,8 @@ func _matches_query(product: Dictionary, query: String) -> bool:
 		product.get("chip_number", ""),
 		product.get("chip_phone", ""),
 		product.get("plate", ""),
+		product.get("identification_plate", ""),
+		product.get("vehicle_plate", ""),
 		product.get("client", ""),
 		product.get("model", ""),
 		product.get("operator", ""),

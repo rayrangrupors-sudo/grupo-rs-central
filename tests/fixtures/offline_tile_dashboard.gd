@@ -1,6 +1,6 @@
 ## Fixture determinística do carregador incremental de tiles.
 ##
-## Não executa _ready do dashboard, não abre HTTP e não acessa API/SGA/Firebase.
+## Não executa _ready do dashboard, não abre HTTP e não acessa API/SGA/Banco local SQL.
 extends "res://src/features/big_map/big_map_tracking_layout.gd"
 
 var offline_http_calls := 0

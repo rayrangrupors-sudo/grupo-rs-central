@@ -1,7 +1,7 @@
 # Mapa Grande
 
 Esta pasta concentra o código do mapa e evita que manutenção de localização
-altere estoque, autenticação, Firebase ou o botão **Sair**.
+altere estoque, autenticação, BancoLocalSQL ou o botão **Sair**.
 
 ## Arquitetura ativa e responsabilidades
 
