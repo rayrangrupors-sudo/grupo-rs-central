@@ -45517,10 +45517,8 @@ func _style_box(fill: Color, border: Color, border_width: int, radius: int, shad
 	style.corner_radius_top_right = radius
 	style.corner_radius_bottom_left = radius
 	style.corner_radius_bottom_right = radius
-	if shadow:
-		style.shadow_color = Color(0, 0, 0, 0.13)
-		style.shadow_size = 18
-		style.shadow_offset = Vector2(0, 7)
+	# Cartões e botões não usam sombra: o contraste vem da borda e das cores.
+	# O parâmetro permanece por compatibilidade com chamadas existentes.
 	return style
 
 

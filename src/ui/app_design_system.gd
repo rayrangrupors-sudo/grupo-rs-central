@@ -19,7 +19,7 @@ static func surface(
 	border: Color,
 	border_width: int = 1,
 	radius: int = 7,
-	with_shadow: bool = true
+	with_shadow: bool = false
 ) -> StyleBoxFlat:
 	var style := StyleBoxFlat.new()
 	style.bg_color = fill
