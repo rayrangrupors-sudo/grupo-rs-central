@@ -113,6 +113,7 @@ const INVENTORY_COMMUNICATION_PAGE_SIZE := 10
 const INVENTORY_COMMUNICATION_TARGET_INTERVAL_SECONDS := 1.0
 const INVENTORY_COMMUNICATION_MAX_INTERVAL_SECONDS := 30.0
 const INVENTORY_COMMUNICATION_MAX_PAGES := 200
+const INVENTORY_DEVICE_PARALLEL_ROW_TIMEOUT_SECONDS := 10.0
 # Consulta um equipamento por vez para limitar a carga nas plataformas/API e
 # manter o resultado da linha atual consistente antes de seguir para a proxima.
 const INVENTORY_DEVICE_CYCLE_CONCURRENCY := 1
@@ -18384,7 +18385,25 @@ func _run_visible_inventory_device_lookup(product: Dictionary, generation: int, 
 		arya_status_busy[query_key] = generation
 
 	var source_mode := _grupo_rs_location_source_mode_for_product(product)
-	var location_result := await _inventory_query_location_with_retries(product, generation, worker_state, source_mode)
+	# Comunicação e chip são consultas independentes. Inicie as duas na mesma
+	# linha e só avance quando ambas responderem ou o prazo da linha terminar.
+	var location_task: Dictionary = {"done": false, "result": {"ok": false, "message": "Comunicação sem resposta no prazo."}}
+	var chip_task: Dictionary = {"done": query_value == "", "result": {"ok": false, "status": "desconhecido", "message": "Chip não informado."}}
+	_run_inventory_location_parallel_task(product, generation, worker_state, source_mode, location_task)
+	if query_value != "":
+		_run_inventory_chip_parallel_task(product, generation, worker_state, chip_task)
+	var row_deadline := Time.get_ticks_msec() + int(INVENTORY_DEVICE_PARALLEL_ROW_TIMEOUT_SECONDS * 1000.0)
+	while _inventory_query_can_continue(generation, worker_state) \
+			and (not bool(location_task.get("done", false)) or not bool(chip_task.get("done", false))) \
+			and Time.get_ticks_msec() < row_deadline:
+		await get_tree().process_frame
+	if not bool(location_task.get("done", false)):
+		location_task["result"] = {"ok": false, "timeout": true, "message": "Comunicação excedeu 10 segundos."}
+		location_task["done"] = true
+	if not bool(chip_task.get("done", false)):
+		chip_task["result"] = {"ok": false, "timeout": true, "status": "erro", "message": "Chip excedeu 10 segundos."}
+		chip_task["done"] = true
+	var location_result: Dictionary = location_task.get("result", {}) as Dictionary
 	if not _inventory_query_can_continue(generation, worker_state):
 		_finish_inventory_query_state(serial, query_key, generation)
 		return false
@@ -18395,12 +18414,7 @@ func _run_visible_inventory_device_lookup(product: Dictionary, generation: int, 
 	else:
 		_cache_location_failure(serial, location_result, previous_location)
 
-	var arya_result: Dictionary = {}
-	if query_value != "":
-		arya_result = await _inventory_query_chip_with_retries(product, generation, worker_state)
-		if not _inventory_query_can_continue(generation, worker_state):
-			_finish_inventory_query_state(serial, query_key, generation)
-			return false
+	var arya_result: Dictionary = chip_task.get("result", {}) as Dictionary
 
 	var records_result := await _inventory_query_records_with_retries(product, location_result, generation, worker_state)
 	if not _inventory_query_can_continue(generation, worker_state):
@@ -18409,6 +18423,16 @@ func _run_visible_inventory_device_lookup(product: Dictionary, generation: int, 
 
 	if query_value != "":
 		arya_result["checked_at"] = Time.get_unix_time_from_system()
+		# Uma falha transitória não deve apagar o último status confirmado do
+		# aparelho. Mantemos a leitura anterior e expomos a falha separadamente.
+		var previous_chip: Dictionary = arya_status_cache.get(query_key, {}) as Dictionary
+		if not bool(arya_result.get("ok", false)) and not previous_chip.is_empty():
+			var chip_error := str(arya_result.get("message", "Consulta temporariamente indisponível.")).strip_edges()
+			var preserved_chip := previous_chip.duplicate(true)
+			preserved_chip["stale"] = true
+			preserved_chip["last_error"] = chip_error
+			preserved_chip["checked_at"] = arya_result.get("checked_at")
+			arya_result = preserved_chip
 		arya_status_cache[query_key] = arya_result
 	var completed_location: Dictionary = location_status_cache.get(serial, {}).duplicate(true)
 	completed_location["records"] = records_result.get("event", {})
@@ -18418,6 +18442,18 @@ func _run_visible_inventory_device_lookup(product: Dictionary, generation: int, 
 	_finish_inventory_query_state(serial, query_key, generation)
 	_request_inventory_table_refresh()
 	return true
+
+
+func _run_inventory_location_parallel_task(product: Dictionary, generation: int, worker_state: Dictionary, source_mode: String, task: Dictionary) -> void:
+	var result := await _inventory_query_location_with_retries(product, generation, worker_state, source_mode)
+	task["result"] = result
+	task["done"] = true
+
+
+func _run_inventory_chip_parallel_task(product: Dictionary, generation: int, worker_state: Dictionary, task: Dictionary) -> void:
+	var result := await _inventory_query_chip_with_retries(product, generation, worker_state)
+	task["result"] = result
+	task["done"] = true
 
 
 func _inventory_query_can_continue(generation: int, worker_state: Dictionary) -> bool:
