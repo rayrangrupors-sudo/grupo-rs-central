@@ -12,6 +12,24 @@ const TrackingNationalErbIndex := preload("res://src/features/big_map/anatel_nat
 
 const TRACKING_POLL_MOVING_SECONDS := 5.0
 const TRACKING_POLL_DEFAULT_SECONDS := 20.0
+const MaintenanceLoader := preload("res://src/features/big_map/maintenance_plate_loader.gd")
+const MaintenanceBinding := preload("res://src/features/big_map/maintenance_binding.gd")
+const MaintenancePanel := preload("res://src/features/big_map/maintenance_panel.gd")
+const MaintenanceRadio := preload("res://src/features/big_map/maintenance_radio_context.gd")
+var maintenance_operator_catalog: Dictionary = {}
+var maintenance_operator_catalog_base := ""
+var maintenance_bindings: Dictionary = {}
+var maintenance_binding_epoch := 0
+var maintenance_binding_busy := false
+const MaintenanceSnapshot := preload("res://src/features/big_map/maintenance_snapshot.gd")
+var maintenance_loader = MaintenanceLoader.new()
+var maintenance_mode := false
+const MaintenanceAnalysis := preload("res://src/features/big_map/maintenance_analysis.gd")
+const MaintenanceWebHistory := preload("res://src/features/big_map/maintenance_web_history.gd")
+var maintenance_analysis_busy := false
+var maintenance_chip_results: Dictionary = {}
+var maintenance_summaries: Dictionary = {}
+var maintenance_reports: Dictionary = {}
 
 var tracking_view: VBoxContainer
 var tracking_last_latency_ms := -1
@@ -22,6 +40,7 @@ var tracking_had_map_rows := false
 var tracking_erb_area_stations: Array[Dictionary] = []
 var tracking_erb_metadata: Dictionary = {}
 var tracking_selected_station: Dictionary = {}
+var tracking_reference_vehicle: Dictionary = {}
 var tracking_last_focused_query_signature := ""
 var tracking_query_ambiguous := false
 var tracking_national_erb_index: RefCounted
@@ -56,11 +75,15 @@ func _show_vehicle_location_monitor() -> void:
 
 
 func _reset_tracking_start_state() -> void:
+	maintenance_mode = false
+	maintenance_loader.cancel()
+	maintenance_reports.clear()
 	vehicle_location_query_queue.clear()
 	vehicle_location_rows.clear()
 	vehicle_location_filtered_rows.clear()
 	vehicle_location_selected.clear()
 	tracking_selected_station.clear()
+	tracking_reference_vehicle.clear()
 	tracking_last_focused_query_signature = ""
 	tracking_last_query_signature = ""
 	tracking_had_map_rows = false
@@ -86,6 +109,10 @@ func _build_vehicle_location_view() -> Control:
 	vehicle_location_api_exclusive = true
 	vehicle_location_queue_after_api_success_only = true
 	tracking_view = TrackingView.new()
+	if not maintenance_loader.changed.is_connected(_on_maintenance_changed):
+		maintenance_loader.changed.connect(_on_maintenance_changed)
+	tracking_view.maintenance_button.pressed.connect(_on_maintenance_pressed)
+	tracking_view.tree_exiting.connect(func(): maintenance_mode = false; maintenance_loader.cancel())
 	vehicle_location_view_root = tracking_view
 	vehicle_location_plate_input = tracking_view.query_input
 	vehicle_location_monitor_select = tracking_view.monitor_select
@@ -144,6 +171,7 @@ func _on_vehicle_location_query_changed(value: String) -> void:
 
 
 func _on_tracking_add_pressed() -> void:
+	_leave_maintenance_mode()
 	_add_vehicle_location_query()
 	vehicle_location_query_trigger = "button"
 	tracking_query_trigger_by_generation[vehicle_location_query_generation] = "button"
@@ -152,6 +180,8 @@ func _on_tracking_add_pressed() -> void:
 func _on_tracking_query_input(event: InputEvent) -> void:
 	var is_submit: bool = event is InputEventKey and event.pressed and not event.echo \
 			and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER)
+	if is_submit:
+		_leave_maintenance_mode()
 	_on_vehicle_location_query_input(event)
 	if is_submit:
 		vehicle_location_query_trigger = "enter"
@@ -159,6 +189,9 @@ func _on_tracking_query_input(event: InputEvent) -> void:
 
 
 func _on_tracking_manual_refresh() -> void:
+	if maintenance_mode:
+		_on_maintenance_pressed()
+		return
 	vehicle_location_query_trigger = "manual_refresh"
 	_refresh_vehicle_location_view(-1)
 
@@ -495,6 +528,14 @@ func _tracking_selected_filter() -> String:
 
 
 func _refresh_vehicle_location_view(expected_generation: int = -1) -> void:
+	if current_section != "vehicle_location":
+		return
+	if expected_generation < 0:
+		expected_generation = vehicle_location_query_generation
+	if expected_generation != vehicle_location_query_generation:
+		return
+	if maintenance_mode:
+		return
 	if vehicle_location_refreshing:
 		return
 	vehicle_location_query_trigger = str(tracking_query_trigger_by_generation.get(
@@ -508,6 +549,8 @@ func _refresh_vehicle_location_view(expected_generation: int = -1) -> void:
 	var query_signature := _tracking_query_signature()
 	var started_at := Time.get_ticks_msec()
 	await super._refresh_vehicle_location_view(expected_generation)
+	if current_section != "vehicle_location":
+		return
 	if expected_generation >= 0 and expected_generation != vehicle_location_query_generation:
 		return
 	tracking_last_latency_ms = maxi(0, Time.get_ticks_msec() - started_at)
@@ -568,6 +611,9 @@ func _tracking_number(value: Variant) -> float:
 
 
 func _location_monitoring_status(location: Dictionary) -> Dictionary:
+	if bool(location.get("maintenance", false)):
+		var state := MaintenanceSnapshot.ignition(location.get("ignition"))
+		return VehicleStatusResolver.apply_state(location, "Ligado" if state == 1 else ("Desligado" if state == 0 else "Ignição não informada"), GREEN if state == 1 else (RED if state == 0 else MUTED))
 	var updated_at := str(location.get("updated_at", "")).strip_edges()
 	return VehicleStatusResolver.resolve(
 		location,
@@ -631,6 +677,10 @@ func _apply_vehicle_location_filters() -> void:
 func _tracking_row_matches_filter(row: Dictionary, selected_filter: String) -> bool:
 	var label := str(_location_monitoring_status(row).get("label", ""))
 	match selected_filter:
+		"Última ignição ligada":
+			return MaintenanceSnapshot.ignition(row.get("ignition")) == 1
+		"Última ignição desligada":
+			return MaintenanceSnapshot.ignition(row.get("ignition")) == 0
 		"Em movimento":
 			return label == "Ligado"
 		"Parados":
@@ -771,12 +821,18 @@ func _tracking_query_diagnostic_message() -> String:
 func _vehicle_location_rows_for_map() -> Array[Dictionary]:
 	var rows: Array[Dictionary] = []
 	for row in vehicle_location_filtered_rows:
+		if bool(row.get("maintenance", false)) and MaintenanceSnapshot.ignition(row.get("ignition")) < 0:
+			continue
 		if _tracking_coordinates_valid(row):
 			rows.append(row.duplicate(true))
 	return rows
 
 
 func _rows_with_tower_context(rows: Array[Dictionary]) -> Array[Dictionary]:
+	# Maintenance selection uses the original snapshot; tower proximity is not
+	# a coverage diagnosis. Avoid recomputing every vehicle × tower on zoom.
+	if maintenance_mode:
+		return rows
 	var integrated: Array[Dictionary] = []
 	var station_rows: Array = vehicle_location_map_canvas.stations if vehicle_location_map_canvas != null else []
 	for row in rows:
@@ -790,6 +846,8 @@ func _rows_with_tower_context(rows: Array[Dictionary]) -> Array[Dictionary]:
 
 
 func _reload_vehicle_location_map(generation: int, rows: Array, view_override: Dictionary = {}) -> void:
+	if bool(view_override.get("interactive", false)):
+		await get_tree().create_timer(0.18).timeout
 	if generation != vehicle_location_map_generation or vehicle_location_map_canvas == null or not is_instance_valid(vehicle_location_map_canvas):
 		return
 	var valid_rows: Array[Dictionary] = []
@@ -896,18 +954,19 @@ func _on_vehicle_location_map_selected(location: Dictionary) -> void:
 	tracking_selected_station.clear()
 	vehicle_location_map_canvas.select_station_by_id("")
 	vehicle_location_selected = location.duplicate(true)
+	tracking_reference_vehicle = location.duplicate(true)
 	_render_vehicle_location_details(vehicle_location_selected)
 	vehicle_location_map_canvas.select_tracking_by_key(str(location.get("serial", location.get("plate", ""))))
-	var latitude := _tracking_number(location.get("lat", 0.0))
-	var longitude := _tracking_number(location.get("lng", 0.0))
-	if vehicle_location_integration.valid_coordinates(latitude, longitude):
-		_on_vehicle_location_map_navigation(latitude, longitude, 16)
+	if location.get("plate_only", false):
+		_request_maintenance_binding(location)
+	# Selecting a marker does not move the camera or request new map tiles.
 
 
 func _on_vehicle_location_station_selected(station: Dictionary) -> void:
 	if station.is_empty():
 		return
 	vehicle_location_selected.clear()
+	maintenance_binding_epoch += 1
 	tracking_selected_station = station.duplicate(true)
 	vehicle_location_map_canvas.clear_tracking_selection()
 	_render_tracking_station_details(tracking_selected_station)
@@ -964,6 +1023,11 @@ func _tracking_table_label(value: String, width: int, expand: bool, color: Color
 func _render_vehicle_location_details(location: Dictionary) -> void:
 	if vehicle_location_details_body == null or not is_instance_valid(vehicle_location_details_body):
 		return
+	if location.get("plate_only", false):
+		var key := _normalize_location_plate(str(location.get("plate", "")))
+		location = maintenance_bindings.get(key, location)
+		if _normalize_location_plate(str(vehicle_location_selected.get("plate", ""))) == key:
+			vehicle_location_selected = location.duplicate(true)
 	_clear_control(vehicle_location_details_body)
 	if tracking_view != null:
 		tracking_view.set_details_title("Veículo selecionado")
@@ -977,30 +1041,71 @@ func _render_vehicle_location_details(location: Dictionary) -> void:
 		vehicle_location_details_body.add_child(empty)
 		return
 	var status := _location_monitoring_status(location)
+	if bool(location.get("maintenance", false)):
+		_render_maintenance_details(location)
+		return
 	var identity := Label.new()
 	identity.text = _blank(str(location.get("plate", location.get("serial", ""))))
 	identity.add_theme_font_override("font", UI_FONT)
 	identity.add_theme_font_size_override("font_size", 21)
 	identity.add_theme_color_override("font_color", status.get("color", BLUE_DARK))
 	vehicle_location_details_body.add_child(identity)
+	var status_badge := PanelContainer.new()
+	status_badge.add_theme_stylebox_override("panel", tracking_view._panel_style(Color(status.get("color", MUTED), 0.10), Color(status.get("color", MUTED), 0.22), 9))
+	var status_label := Label.new()
+	status_label.text = "●  " + str(status.get("label", "Sem status"))
+	status_label.add_theme_font_override("font", UI_FONT)
+	status_label.add_theme_font_size_override("font_size", 12)
+	status_label.add_theme_color_override("font_color", status.get("color", MUTED))
+	status_badge.add_child(status_label)
+	vehicle_location_details_body.add_child(status_badge)
 	var coordinates := "Sem posição válida"
 	if _tracking_coordinates_valid(location):
 		coordinates = "%.6f, %.6f" % [_tracking_number(location.get("lat", 0.0)), _tracking_number(location.get("lng", 0.0))]
 	for item in [
-		["Status", str(status.get("label", "Sem status"))],
 		["Série", str(location.get("serial", ""))],
 		["Cliente", str(location.get("client", ""))],
 		["Velocidade", _location_speed_display(location.get("speed", ""))],
 		["Última comunicação", str(location.get("updated_at", ""))],
+	]:
+		vehicle_location_details_body.add_child(_tracking_detail_line(str(item[0]), _blank(str(item[1]))))
+	var vehicle_technical := VBoxContainer.new()
+	vehicle_technical.add_theme_constant_override("separation", 4)
+	vehicle_technical.hide()
+	for item in [
 		["Coordenadas", coordinates],
 		["Operadora", str(location.get("tracker_operator", location.get("operator", "Não determinada")))],
 		["ERBs na área", str(location.get("nearby_tower_count", vehicle_location_map_canvas.stations.size()))],
 		["Fonte", str(location.get("source", vehicle_location_source))],
 	]:
-		vehicle_location_details_body.add_child(_tracking_detail_line(str(item[0]), _blank(str(item[1]))))
+		vehicle_technical.add_child(_tracking_detail_line(str(item[0]), _blank(str(item[1]))))
+	var vehicle_expand := CheckButton.new()
+	vehicle_expand.text = "Ver detalhes técnicos"
+	vehicle_expand.add_theme_font_override("font", UI_FONT)
+	vehicle_expand.add_theme_font_size_override("font_size", 12)
+	vehicle_expand.add_theme_color_override("font_color", BLUE_DARK)
+	vehicle_expand.toggled.connect(func(shown: bool): vehicle_technical.visible = shown)
+	vehicle_location_details_body.add_child(vehicle_expand)
+	vehicle_location_details_body.add_child(vehicle_technical)
+	if bool(location.get("maintenance", false)):
+		vehicle_location_details_body.add_child(_tracking_detail_line("APN", _blank(str(location.get("apn", "")))))
+		vehicle_location_details_body.add_child(_tracking_detail_line("Código da operadora (API)", _blank(str(location.get("operator_code", "")))))
 	var center_button := _make_action_button("Centralizar no mapa", Color.WHITE, BLUE, BLUE, Vector2(0, 38), Callable(self, "_center_vehicle_location_selected"))
 	center_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vehicle_location_details_body.add_child(center_button)
+	if bool(location.get("maintenance", false)):
+		var serial := str(location.get("serial", ""))
+		var analyze := _make_action_button("Analisar últimas 20 comunicações", BLUE, Color.WHITE, BLUE, Vector2(0, 42), Callable(self, "_analyze_maintenance").bind(location.duplicate(true)))
+		analyze.disabled = maintenance_analysis_busy or maintenance_loader.running
+		vehicle_location_details_body.add_child(analyze)
+		if maintenance_reports.has(serial):
+			var report := Label.new()
+			report.text = str(maintenance_reports[serial])
+			report.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			report.add_theme_font_size_override("font_size", 12)
+			vehicle_location_details_body.add_child(report)
+			var sms := _make_action_button("Revisar configuração por SMS", Color.WHITE, BLUE, BLUE, Vector2(0, 38), Callable(self, "_review_maintenance_sms").bind(location.duplicate(true)))
+			vehicle_location_details_body.add_child(sms)
 
 
 func _render_tracking_station_details(station: Dictionary) -> void:
@@ -1013,25 +1118,102 @@ func _render_tracking_station_details(station: Dictionary) -> void:
 	var title := Label.new()
 	title.text = "ERB  " + _tracking_source_value(str(station.get("id", station.get("code", ""))))
 	title.add_theme_font_override("font", UI_FONT)
-	title.add_theme_font_size_override("font_size", 19)
+	title.add_theme_font_size_override("font_size", 23)
 	title.add_theme_color_override("font_color", BLUE_DARK)
 	vehicle_location_details_body.add_child(title)
 	var technologies := _tracking_source_array(station.get("technologies", []))
 	var bands := _tracking_source_array(station.get("bands", []))
+	var provider := _tracking_source_value(str(station.get("provider_name", station.get("operator", ""))))
+	var generation := _tracking_source_value(str(station.get("generation", "")))
+	var situation := _tracking_source_value(str(station.get("status", "")))
+	var operator_identity: Dictionary = vehicle_location_map_canvas.call("_station_operator_identity", provider)
+	var operator_color: Color = operator_identity.get("color", BLUE)
 	var address_parts: Array[String] = []
 	for address_field in ["address", "address_number", "address_complement", "district"]:
 		var address_value := str(station.get(address_field, "")).strip_edges()
 		if address_value != "":
 			address_parts.append(address_value)
+	var distance_text := "Selecione um veículo para comparar"
+	if _tracking_coordinates_valid(tracking_reference_vehicle):
+		var distance_km := _smart_4g_distance_km(_tracking_number(tracking_reference_vehicle.get("lat", 0.0)), _tracking_number(tracking_reference_vehicle.get("lng", 0.0)), float(station.get("lat", 0.0)), float(station.get("lng", 0.0)))
+		distance_text = "%.2f km" % distance_km
+	var status_badge := PanelContainer.new()
+	var licensed := situation.to_lower().contains("licen")
+	var status_color := GREEN if licensed else ORANGE
+	status_badge.add_theme_stylebox_override("panel", tracking_view._panel_style(Color(status_color, 0.10), Color(status_color, 0.20), 10))
+	var status_label := Label.new()
+	status_label.text = "●  " + situation
+	status_label.add_theme_font_override("font", UI_FONT)
+	status_label.add_theme_font_size_override("font_size", 12)
+	status_label.add_theme_color_override("font_color", status_color)
+	status_badge.add_child(status_label)
+	vehicle_location_details_body.add_child(status_badge)
+
+	var operator_card := PanelContainer.new()
+	operator_card.add_theme_stylebox_override("panel", tracking_view._panel_style(Color(operator_color, 0.055), Color(operator_color, 0.24), 10))
+	var operator_row := HBoxContainer.new()
+	operator_row.add_theme_constant_override("separation", 12)
+	operator_card.add_child(operator_row)
+	var operator_stack := VBoxContainer.new()
+	operator_stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	operator_stack.add_theme_constant_override("separation", 1)
+	operator_row.add_child(operator_stack)
+	var operator_name := Label.new()
+	operator_name.text = provider
+	operator_name.add_theme_font_override("font", UI_FONT)
+	operator_name.add_theme_font_size_override("font_size", 18)
+	operator_name.add_theme_color_override("font_color", operator_color)
+	operator_stack.add_child(operator_name)
+	var operator_caption := Label.new()
+	operator_caption.text = "Operadora"
+	operator_caption.add_theme_font_override("font", UI_FONT)
+	operator_caption.add_theme_font_size_override("font_size", 10)
+	operator_caption.add_theme_color_override("font_color", MUTED)
+	operator_stack.add_child(operator_caption)
+	var technology_stack := VBoxContainer.new()
+	technology_stack.custom_minimum_size.x = 105
+	operator_row.add_child(technology_stack)
+	var technology_value := Label.new()
+	technology_value.text = technologies
+	technology_value.add_theme_font_override("font", UI_FONT)
+	technology_value.add_theme_font_size_override("font_size", 15)
+	technology_value.add_theme_color_override("font_color", BLUE_DARK)
+	technology_stack.add_child(technology_value)
+	var technology_caption := Label.new()
+	technology_caption.text = "Tecnologia · " + generation
+	technology_caption.add_theme_font_override("font", UI_FONT)
+	technology_caption.add_theme_font_size_override("font_size", 10)
+	technology_caption.add_theme_color_override("font_color", MUTED)
+	technology_stack.add_child(technology_caption)
+	vehicle_location_details_body.add_child(operator_card)
+
+	var location_card := PanelContainer.new()
+	location_card.add_theme_stylebox_override("panel", tracking_view._panel_style(Color("#f7fafd"), Color("#dce7f0"), 9))
+	var location_stack := VBoxContainer.new()
+	location_stack.add_theme_constant_override("separation", 5)
+	location_card.add_child(location_stack)
+	var municipality := Label.new()
+	municipality.text = "%s · %s" % [_tracking_source_value(str(station.get("city", ""))), _tracking_source_value(str(station.get("uf", "")))]
+	municipality.add_theme_font_override("font", UI_FONT)
+	municipality.add_theme_font_size_override("font_size", 12)
+	municipality.add_theme_color_override("font_color", BLUE_DARK)
+	location_stack.add_child(municipality)
+	var distance := Label.new()
+	distance.text = "Distância do veículo: " + distance_text
+	distance.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	distance.add_theme_font_override("font", UI_FONT)
+	distance.add_theme_font_size_override("font_size", 11)
+	distance.add_theme_color_override("font_color", MUTED)
+	location_stack.add_child(distance)
+	vehicle_location_details_body.add_child(location_card)
+	var station_technical := VBoxContainer.new()
+	station_technical.add_theme_constant_override("separation", 4)
+	station_technical.hide()
 	for item in [
-		["Município / UF", "%s / %s" % [_tracking_source_value(str(station.get("city", ""))), _tracking_source_value(str(station.get("uf", "")))]],
-		["Prestadora", _tracking_source_value(str(station.get("provider_name", station.get("operator", ""))))],
 		["Entidade", _tracking_source_value(str(station.get("entity", "")))],
 		["Geração", _tracking_source_value(str(station.get("generation", "")))],
-		["Tecnologias", technologies],
 		["Faixas", bands],
 		["Frequência TX / RX", "%s / %s MHz" % [_tracking_source_value(str(station.get("frequency_tx_mhz", ""))), _tracking_source_value(str(station.get("frequency_rx_mhz", "")))]],
-		["Situação", _tracking_source_value(str(station.get("status", "")))],
 		["1º licenciamento", _tracking_source_value(str(station.get("first_license_date", "")))],
 		["Licenciamento", _tracking_source_value(str(station.get("license_date", "")))],
 		["Validade", _tracking_source_value(str(station.get("license_valid_until", "")))],
@@ -1040,7 +1222,15 @@ func _render_tracking_station_details(station: Dictionary) -> void:
 		["Coordenadas", "%.6f, %.6f" % [float(station.get("lat", 0.0)), float(station.get("lng", 0.0))]],
 		["Fonte", "Anatel · Estações SMP licenciadas"],
 	]:
-		vehicle_location_details_body.add_child(_tracking_detail_line(str(item[0]), str(item[1])))
+		station_technical.add_child(_tracking_detail_line(str(item[0]), str(item[1])))
+	var station_expand := CheckButton.new()
+	station_expand.text = "Ver detalhes técnicos"
+	station_expand.add_theme_font_override("font", UI_FONT)
+	station_expand.add_theme_font_size_override("font_size", 12)
+	station_expand.add_theme_color_override("font_color", BLUE_DARK)
+	station_expand.toggled.connect(func(shown: bool): station_technical.visible = shown)
+	vehicle_location_details_body.add_child(station_expand)
+	vehicle_location_details_body.add_child(station_technical)
 
 
 func _render_tracking_station_cluster_details(station: Dictionary) -> void:
@@ -1121,7 +1311,7 @@ func _tracking_detail_line(caption_text: String, value_text: String) -> Control:
 func _clear_control(control: Control) -> void:
 	for child in control.get_children():
 		control.remove_child(child)
-		child.free()
+		child.queue_free()
 
 
 func _center_vehicle_location_selected() -> void:
@@ -1134,6 +1324,9 @@ func _center_vehicle_location_selected() -> void:
 
 
 func _update_tracking_runtime_from_rows(rows: Array[Dictionary], metrics: Dictionary) -> void:
+	if maintenance_mode:
+		tracking_view.set_runtime(maintenance_loader.message, MUTED, "Manutenção · sem consulta automática", "Verde: ignição ligada · vermelho: desligada")
+		return
 	var query := _tracking_query_signature()
 	if query == "":
 		_update_tracking_runtime("Informe uma placa, número de série ou cliente para iniciar", MUTED)
@@ -1148,7 +1341,417 @@ func _update_tracking_runtime(message: String, color: Color) -> void:
 		return
 	var interval := TRACKING_POLL_MOVING_SECONDS if _tracking_selected_filter() == "Em movimento" else TRACKING_POLL_DEFAULT_SECONDS
 	var metadata := "OpenStreetMap · ERBs Anatel · atualização a cada %d s" % int(interval)
+	if maintenance_mode:
+		metadata = "OpenStreetMap · ERBs Anatel · manutenções sem atualização automática"
 	var updated := "Aguardando atualização"
 	if tracking_last_success_at != "":
 		updated = "Atualizado %s · %d ms" % [tracking_last_success_at, tracking_last_latency_ms]
 	tracking_view.set_runtime(message, color, metadata, updated)
+
+
+func _leave_maintenance_mode() -> void:
+	if not maintenance_mode:
+		return
+	maintenance_mode = false
+	maintenance_loader.cancel()
+	vehicle_location_rows.clear()
+	tracking_view.set_maintenance_progress(false, false, {}, "")
+
+
+func _on_maintenance_pressed() -> void:
+	if maintenance_loader.running:
+		maintenance_loader.cancel()
+		return
+	if vehicle_location_refreshing:
+		_show_warning("Manutenções", "Aguarde a consulta atual terminar antes de iniciar o levantamento.")
+		return
+	if maintenance_analysis_busy or maintenance_loader._busy:
+		_show_warning("Manutenções", "Aguarde as consultas em andamento encerrarem antes de iniciar outra carga.")
+		return
+	maintenance_mode = true
+	maintenance_binding_epoch += 1
+	maintenance_bindings.clear()
+	vehicle_location_query_generation += 1
+	vehicle_location_query_queue.clear()
+	vehicle_location_plate_input.clear()
+	vehicle_location_rows.clear()
+	vehicle_location_selected.clear()
+	maintenance_reports.clear()
+	maintenance_chip_results.clear()
+	maintenance_summaries.clear()
+	tracking_view.monitor_select.select(0)
+	await maintenance_loader.start(self)
+
+
+func _on_maintenance_changed() -> void:
+	if not maintenance_mode or tracking_view == null or not is_instance_valid(tracking_view) or not tracking_view.is_inside_tree():
+		return
+	vehicle_location_rows.assign(maintenance_loader.rows)
+	tracking_view.set_maintenance_progress(true, maintenance_loader.running, maintenance_loader.counts(), maintenance_loader.message)
+	if maintenance_loader.rows.is_empty():
+		return
+	_apply_vehicle_location_filters()
+
+
+func _request_maintenance_binding(location: Dictionary, force: bool = false) -> void:
+	maintenance_binding_epoch += 1
+	var epoch := maintenance_binding_epoch
+	var ticket: int = maintenance_loader.generation
+	var key := _normalize_location_plate(str(location.get("plate", "")))
+	if not force and maintenance_bindings.has(key) and maintenance_bindings[key].get("binding_state", "") != "loading":
+		_render_vehicle_location_details(maintenance_bindings[key])
+		return
+	var pending := location.duplicate(true)
+	pending.binding_state = "loading"
+	maintenance_bindings[key] = pending
+	_render_vehicle_location_details(pending)
+	await get_tree().create_timer(0.15).timeout
+	while maintenance_binding_busy and maintenance_mode and ticket == maintenance_loader.generation and epoch == maintenance_binding_epoch:
+		await get_tree().process_frame
+	if not maintenance_mode or ticket != maintenance_loader.generation or epoch != maintenance_binding_epoch: return
+	maintenance_binding_busy = true
+	var result: Dictionary = await MaintenanceBinding.resolve(self,location)
+	maintenance_binding_busy = false
+	if not maintenance_mode or ticket != maintenance_loader.generation: return
+	maintenance_bindings[key] = result
+	if epoch == maintenance_binding_epoch and tracking_selected_station.is_empty() and _normalize_location_plate(str(vehicle_location_selected.get("plate", ""))) == key:
+		vehicle_location_selected = result.duplicate(true)
+		_render_vehicle_location_details(result)
+
+
+func _render_maintenance_details(location: Dictionary) -> void:
+	MaintenancePanel.render(self, location)
+
+
+func _render_maintenance_details_legacy(location: Dictionary) -> void:
+	tracking_view.details_title.hide()
+	var header := PanelContainer.new()
+	header.add_theme_stylebox_override("panel", tracking_view._panel_style(Color("#103f63"), Color("#103f63"), 9))
+	var heading := Label.new()
+	heading.text = "VEÍCULO SELECIONADO\nAnálise da manutenção"
+	heading.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	heading.add_theme_color_override("font_color", Color.WHITE)
+	heading.add_theme_font_size_override("font_size", 16)
+	header.add_child(heading)
+	vehicle_location_details_body.add_child(header)
+	for item in [["Placa", location.get("plate", "")], ["Número de série", location.get("serial", "")], ["Cliente", location.get("client", "")], ["Operadora", location.get("operator", "")], ["Última comunicação", location.get("updated_at", "")], ["Ignição na última comunicação", _location_monitoring_status(location).get("label", "Não informada")]]:
+		vehicle_location_details_body.add_child(_tracking_detail_line(str(item[0]), _blank(str(item[1]))))
+	var note := Label.new()
+	note.text = "A cor indica somente a ignição. A análise é experimental e não confirma defeito."
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	note.add_theme_font_size_override("font_size", 11)
+	note.add_theme_color_override("font_color", Color("#a85600"))
+	vehicle_location_details_body.add_child(note)
+	var binding_ok: bool = not location.get("plate_only", false) or location.get("binding_state", "") == "confirmed"
+	if not binding_ok:
+		var binding_note := Label.new()
+		var state := str(location.get("binding_state", "pending"))
+		var labels := {"pending":"Vínculo pendente. Selecione a agulha para consultar.","loading":"Consultando associação desta placa…","not_found":"Não foi encontrada uma associação para esta placa.","error":"Não foi possível consultar a associação. Tente novamente.","ambiguous":"Mais de uma associação encontrada. Análise bloqueada.","conflict":"Associação divergente da lista de manutenção. Análise e SMS bloqueados."}
+		binding_note.text = labels.get(state, labels.error)
+		binding_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		binding_note.add_theme_color_override("font_color", BLUE_DARK)
+		binding_note.add_theme_font_size_override("font_size", 12)
+		vehicle_location_details_body.add_child(binding_note)
+		if state != "loading":
+			var retry: Button = tracking_view._button("Consultar associação", BLUE, Color.WHITE, 0)
+			retry.pressed.connect(Callable(self,"_request_maintenance_binding").bind(location.duplicate(true),true), CONNECT_DEFERRED)
+			vehicle_location_details_body.add_child(retry)
+	var analyze: Button = tracking_view._button("Analisar últimas 20 comunicações", BLUE, Color.WHITE, 0)
+	analyze.add_theme_font_size_override("font_size", 11)
+	analyze.pressed.connect(Callable(self,"_analyze_maintenance").bind(location.duplicate(true)), CONNECT_DEFERRED)
+	analyze.disabled = maintenance_analysis_busy or maintenance_loader.running or not binding_ok
+	vehicle_location_details_body.add_child(analyze)
+	var serial := str(location.get("serial", ""))
+	var apn := str(location.get("apn", ""))
+	var provider := "Innova" if _apn_is_hinova(apn) else ("Link Solutions" if _apn_is_linksolutions(apn) else "Não identificado")
+	var chip: Dictionary = maintenance_chip_results.get(serial, {})
+	var chip_status := str(chip.get("status", ""))
+	var status_text := "Não consultado"
+	if maintenance_reports.has(serial):
+		status_text = "Online" if chip_status == "online" else ("Offline" if chip_status == "offline" else "Consulta indisponível")
+		if maintenance_analysis_busy and not maintenance_summaries.has(serial):
+			status_text = "Consultando…"
+	var chip_card := PanelContainer.new()
+	chip_card.add_theme_stylebox_override("panel", tracking_view._panel_style(Color("#edf5fa"), BORDER, 8))
+	var chip_row := HBoxContainer.new()
+	chip_card.add_child(chip_row)
+	var chip_label := Label.new()
+	chip_label.text = "%s · %s\nAPN: %s" % [provider, status_text, _blank(apn)]
+	chip_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	chip_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	chip_label.add_theme_color_override("font_color", BLUE_DARK)
+	chip_row.add_child(chip_label)
+	if binding_ok and chip_status == "online" and not maintenance_analysis_busy:
+		var sms := _make_icon_action_button(ICON_DIR + "mensagem.svg", BLUE, BLUE, Vector2(34,34), Callable(self,"_review_maintenance_sms").bind(location.duplicate(true)))
+		sms.name = "MaintenanceSms"
+		var reason := _maintenance_sms_unavailable_reason(location)
+		sms.disabled = reason != ""
+		sms.tooltip_text = "Enviar SMS" if reason == "" else reason
+		chip_row.add_child(sms)
+	vehicle_location_details_body.add_child(chip_card)
+	if maintenance_reports.has(serial):
+		var report := Label.new()
+		report.text = str(maintenance_summaries.get(serial, "Consultando histórico e chip…"))
+		report.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		report.add_theme_font_size_override("font_size", 12)
+		vehicle_location_details_body.add_child(report)
+		report.add_theme_color_override("font_color", Color("#182636"))
+		var evidence := Label.new()
+		evidence.text = str(maintenance_reports[serial])
+		evidence.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		evidence.add_theme_color_override("font_color", BLUE_DARK)
+		evidence.hide()
+		var expand := CheckButton.new()
+		expand.text = "Ver evidências"
+		expand.add_theme_color_override("font_color", BLUE_DARK)
+		expand.add_theme_color_override("font_hover_color", BLUE)
+		expand.toggled.connect(func(shown: bool): evidence.visible = shown)
+		vehicle_location_details_body.add_child(expand)
+		vehicle_location_details_body.add_child(evidence)
+
+
+func _analyze_maintenance(location: Dictionary) -> void:
+	if location.get("plate_only", false) and location.get("binding_state", "") != "confirmed":
+		return
+	if maintenance_analysis_busy or maintenance_loader.running:
+		return
+	maintenance_analysis_busy = true
+	var serial := str(location.get("serial", ""))
+	maintenance_chip_results.erase(serial)
+	maintenance_summaries.erase(serial)
+	var ticket: int = maintenance_loader.generation
+	maintenance_reports[serial] = "Consultando histórico e chip em paralelo..."
+	_render_vehicle_location_details(location)
+	var state := {"history_done": false, "chip_done": false, "radio_done": true, "records": [], "chip": {}, "note": "", "closed": false}
+	var deadline := Time.get_ticks_msec() + int(_maintenance_analysis_timeout_seconds() * 1000.0)
+	_maintenance_history_task(location, state)
+	_maintenance_chip_task(location, state)
+	while not state.history_done or not state.chip_done or not state.radio_done:
+		if ticket != maintenance_loader.generation or not maintenance_mode or Time.get_ticks_msec() >= deadline:
+			break
+		await get_tree().process_frame
+	state.closed = true
+	maintenance_analysis_busy = false
+	if ticket != maintenance_loader.generation or not maintenance_mode:
+		return
+	if not state.history_done:
+		state.note += "\nHistórico não concluiu no limite de espera; análise parcial. Tente novamente depois."
+	if not state.chip_done:
+		state.note += "\nConsulta do chip não concluiu; estado atual indisponível."
+	maintenance_reports[serial] = str(state.note) + "\n\n" + MaintenanceAnalysis.summarize(state.records, state.chip)
+	maintenance_chip_results[serial] = state.chip.duplicate(true) if state.chip_done else {}
+	maintenance_summaries[serial] = MaintenanceAnalysis.compact(state.records, state.chip)
+	var radio: Dictionary = state.get("radio", {})
+	if not radio.is_empty():
+		maintenance_reports[serial] += "\n\n" + str(radio.get("note", ""))
+		if radio.get("hypothesis", false) and str(maintenance_summaries[serial]).begins_with("Análise inconclusiva"):
+			maintenance_summaries[serial] = "Possível causa: perda de sinal, não confirmada.\nEvidência: ERB da operadora a %.1f km; outra a %.1f km, no recorte consultado.\nPróxima ação: verificar cobertura real e conectividade; distância não mede sinal." % [radio.own_km, radio.other_km]
+	elif not state.radio_done:
+		maintenance_reports[serial] += "\n\nContexto de ERBs não concluiu no prazo; nenhuma conclusão sobre cobertura."
+	var record_index := 0
+	for record in state.records:
+		record_index += 1
+		maintenance_reports[serial] += "\n\nRegistro %d · GPS: %s · Servidor: %s\nIgnição: %s · Tensão: %s V" % [record_index, _blank(str(record.get("gps_at", record.get("updated_at", "")))), _blank(str(record.get("server_at", ""))), str(record.get("ignition", "não informada")), _blank(str(record.get("battery_voltage", "")))]
+	if state.has("enriched_location"):
+		var enriched: Dictionary = state.enriched_location
+		maintenance_bindings[_normalize_location_plate(str(enriched.get("plate", "")))] = enriched
+	if not vehicle_location_selected.is_empty() and tracking_selected_station.is_empty():
+		_render_vehicle_location_details(vehicle_location_selected)
+
+
+func _maintenance_analysis_timeout_seconds() -> float:
+	return 90.0
+
+
+func _maintenance_chip_task(location: Dictionary, state: Dictionary) -> void:
+	if location.get("plate_only", false):
+		var equipment: Dictionary = await _grupo_rs_api_find_equipment(str(location.get("serial", "")), true)
+		if state.get("closed", false): return
+		if not equipment.get("ok", false): state.chip_done = true; return
+		var raw: Dictionary = equipment.get("row", {})
+		var details := _grupo_rs_api_normalize_location(raw)
+		if str(details.get("serial", "")) != str(location.get("serial", "")):
+			state.chip_done = true
+			return
+		location = location.duplicate(true)
+		for field in ["chip", "phone", "apn", "operator"]:
+			if str(details.get(field, "")) != "": location[field] = details[field]
+		if str(location.get("chip", "")) == "": location.chip = str(raw.get("numeroChip", ""))
+		if str(location.get("phone", "")) == "": location.phone = str(raw.get("numeroTelefone", ""))
+		if str(location.get("operator", "")) == "":
+			if maintenance_operator_catalog_base != selected_branch_grupo_rs_base_url:
+				maintenance_operator_catalog.clear()
+				maintenance_operator_catalog_base = selected_branch_grupo_rs_base_url
+			var code := _grupo_rs_api_integer_value(raw.get("codOperadora", raw.get("CodOperadora", 0)))
+			if code > 0 and maintenance_operator_catalog.is_empty():
+				var catalog := await _modern_grupo_rs_read_get("equipamentos_editar.php?acao=novo")
+				if state.get("closed", false): return
+				if catalog.get("ok", false):
+					for option in _legacy_select_options(str(catalog.get("body", "")), "CodOperadora"):
+						var value := str(option.get("value", ""))
+						if value.is_valid_int() and int(value)>0: maintenance_operator_catalog[int(value)] = str(option.get("label", ""))
+			location.operator = str(maintenance_operator_catalog.get(code, ""))
+		location = _maintenance_complete_sms_phone(location)
+		state.enriched_location = location
+		_maintenance_radio_task(location, state)
+	var chip := str(location.get("chip", "")).strip_edges()
+	var apn := str(location.get("apn", ""))
+	if chip != "":
+		if _apn_is_hinova(apn):
+			state.chip = await _lookup_arya_chip_status(chip)
+		elif _apn_is_linksolutions(apn):
+			state.chip = await _lookup_linksolutions_chip_status(chip, false)
+			if str(state.chip.get("status", "")) == "login" and not state.get("closed", false):
+				var login := await _request_linksolutions_login()
+				if login.get("ok", false) and not state.get("closed", false):
+					state.chip = await _lookup_linksolutions_chip_status(chip, false)
+	state.chip_done = true
+
+
+func _maintenance_radio_task(location: Dictionary, state: Dictionary) -> void:
+	state.radio_done = false
+	var stations: Array = []
+	if tracking_erb_index_mode == "national_partitioned" and tracking_national_erb_index != null and str(location.get("lat", "")).is_valid_float() and str(location.get("lng", "")).is_valid_float():
+		var lat := float(location.lat)
+		var lng := float(location.lng)
+		var dx := 15.0 / (111.0 * maxf(cos(deg_to_rad(lat)), 0.1))
+		var bounds := {"min_lat":lat-15.0/111.0,"max_lat":lat+15.0/111.0,"min_lng":lng-dx,"max_lng":lng+dx}
+		var output := {}
+		var task := WorkerThreadPool.add_task(Callable(tracking_national_erb_index,"query_viewport_threadsafe_to").bind(bounds,14,{},output))
+		while not WorkerThreadPool.is_task_completed(task): await get_tree().process_frame
+		WorkerThreadPool.wait_for_task_completion(task)
+		var query: Dictionary = output.get("result", {})
+		if not query.get("ok", false):
+			if not state.get("closed", false):
+				state.radio = {"hypothesis":false,"note":"Consulta de ERBs indisponível; cobertura não avaliada."}
+				state.radio_done = true
+			return
+		stations = query.get("stations", [])
+	elif smart_4g_anatel != null:
+		stations = smart_4g_anatel.get("stations")
+	if state.get("closed", false): return
+	if stations.is_empty():
+		state.radio = {"hypothesis":false,"note":"Sem ERBs disponíveis no catálogo/recorte consultado; cobertura não avaliada."}
+		state.radio_done = true
+		return
+	state.radio = MaintenanceRadio.evaluate(location, stations)
+	state.radio.note = str(state.radio.note) + (" Fonte: catálogo regional Anatel." if tracking_erb_index_mode == "regional_fallback" else " Fonte: índice Anatel.")
+	state.radio_done = true
+
+
+func _maintenance_history_task(location: Dictionary, state: Dictionary) -> void:
+	var vehicle := str(location.get("vehicle_id", ""))
+	var reference := _grupo_rs_datetime_to_unix(str(location.get("updated_at", "")))
+	if vehicle == "" or reference <= 0:
+		state.note = "Histórico indisponível: identificação ou horário da última comunicação ausente."
+		state.history_done = true
+		return
+	var ticket: int = maintenance_loader.generation
+	var deadline := Time.get_ticks_msec() + 60000
+	var records: Array[Dictionary] = []
+	var seen := {}
+	var complete := false
+	var skip := 0
+	# Bounded time window. Never label a truncated API page as the last 20.
+	while Time.get_ticks_msec() < deadline and ticket == maintenance_loader.generation and not state.get("closed", false) and skip < 5000:
+		var path := "/endpoints/v1/registros/listar.php?codVeiculo=%s&dataInicial=%s&dataFinal=%s&skip=%d&take=1000" % [vehicle.uri_encode(), _format_grupo_rs_api_records_datetime(reference - 604800).uri_encode(), _format_grupo_rs_api_records_datetime(reference + 60).uri_encode(), skip]
+		var result := await _grupo_rs_api_get(path, true, true)
+		if not result.get("ok", false):
+			break
+		var payload: Variant = JSON.parse_string(str(result.get("body", "")))
+		if payload == null:
+			break
+		var page := _grupo_rs_api_extract_rows(payload)
+		for raw in page:
+			var normalized := _grupo_rs_api_normalize_location(raw)
+			var received_vehicle := str(normalized.get("vehicle_id", ""))
+			if received_vehicle != "" and received_vehicle != vehicle:
+				continue
+			var signature := JSON.stringify(raw).sha256_text()
+			if not seen.has(signature):
+				seen[signature] = true
+				records.append(normalized)
+		var pagination := _grupo_rs_api_pagination_state(payload, skip, page.size())
+		if (pagination.get("pagination", {}) as Dictionary).is_empty():
+			# This endpoint returns success/total/data, unlike the location endpoint.
+			if not payload is Dictionary or not bool(payload.get("success", false)) or not payload.get("data") is Array:
+				break
+			pagination = {"has_more": page.size() >= 1000, "next_skip": skip + page.size()}
+		if not pagination.get("has_more", false):
+			complete = true
+			break
+		var next := int(pagination.get("next_skip", skip))
+		if next <= skip:
+			break
+		skip = next
+	if complete:
+		records.sort_custom(func(a: Dictionary, b: Dictionary): return _grupo_rs_datetime_to_unix(str(a.get("updated_at", ""))) > _grupo_rs_datetime_to_unix(str(b.get("updated_at", ""))))
+		state.records = records.slice(0, 20)
+		state.note = "Amostra: até 20 registros mais recentes na janela de 7 dias anterior à última comunicação carregada."
+	else:
+		state.note = "Histórico incompleto ou indisponível; não é possível confirmar os 20 registros mais recentes."
+	if (state.records as Array).is_empty() and ticket == maintenance_loader.generation and maintenance_mode and not state.get("closed", false):
+		var fallback := await MaintenanceWebHistory.fetch(self, location, func(): return ticket == maintenance_loader.generation and maintenance_mode and not state.get("closed", false))
+		if fallback.get("ok", false):
+			state.records = fallback.get("records", [])
+			state.note = "Histórico complementado pela plataforma web: até 20 registros na janela de 7 dias anterior à última comunicação."
+		else:
+			state.note += "\n" + str(fallback.get("message", "Histórico web indisponível."))
+	state.history_done = true
+
+
+func _maintenance_complete_sms_phone(location: Dictionary) -> Dictionary:
+	var result := location.duplicate(true)
+	if str(result.get("phone", "")).strip_edges() != "" or result.get("binding_state", "") != "confirmed":
+		return result
+	var phones := {}
+	for member in result.get("maintenance_members", []):
+		if str(member.get("serial", "")) != str(result.get("serial", "")):
+			continue
+		if _normalize_location_plate(str(member.get("plate", ""))) != _normalize_location_plate(str(result.get("plate", ""))):
+			continue
+		var phone := _digits_only(str(member.get("phone", "")))
+		if phone.length() >= 10 and phone.length() <= 15:
+			phones[phone] = true
+	if phones.size() == 1:
+		result.phone = phones.keys()[0]
+		result.phone_source = "Lista web · série e placa confirmadas"
+	return result
+
+
+func _maintenance_sms_unavailable_reason(location: Dictionary) -> String:
+	if str(location.get("apn", "")).strip_edges() == "":
+		return "APN do aparelho não informada. SMS bloqueado."
+	var phone_length := _digits_only(str(location.get("phone", ""))).length()
+	if phone_length < 10 or phone_length > 15:
+		return "Telefone do chip não confirmado para este aparelho."
+	if _rs300_apn_command_for_apn(str(location.get("serial", "")), str(location.get("apn", ""))) == "":
+		return "Configuração de SMS não suportada para este aparelho."
+	return ""
+
+
+func _review_maintenance_sms(location: Dictionary) -> void:
+	if location.get("plate_only", false) and location.get("binding_state", "") != "confirmed":
+		return
+	var serial := str(location.get("serial", ""))
+	if str((maintenance_chip_results.get(serial, {}) as Dictionary).get("status", "")) != "online" or maintenance_analysis_busy:
+		return
+	var phone := str(location.get("phone", ""))
+	var command := _rs300_apn_command_for_apn(serial, str(location.get("apn", "")))
+	var unavailable_reason := _maintenance_sms_unavailable_reason(location)
+	if unavailable_reason != "":
+		_show_warning("SMS indisponível", unavailable_reason + " Nenhum comando foi enviado.")
+		return
+	_confirm_action("Revisar SMS de configuração", "Destinatário: %s\nSérie: %s\n\n%s\n\nEnvio sujeito à tarifa da conta; custo não confirmado. Enviar não comprova recuperação. Deseja enviar este comando?" % [phone, serial, command], func(): _send_maintenance_sms(phone, command, serial, str(location.get("apn", ""))))
+
+
+func _send_maintenance_sms(phone: String, command: String, serial: String, apn: String) -> void:
+	var reason := _maintenance_sms_unavailable_reason({"phone": phone, "serial": serial, "apn": apn})
+	if reason != "":
+		_show_warning("SMS indisponível", reason + " Nenhum comando foi enviado.")
+		return
+	# The existing SMS workflow owns routing and audit, not the chip-status provider.
+	var result := await _send_grupo_rs_sms_manual_queue(phone, serial, apn, command, "Mapa Grande · manual")
+	if maintenance_mode and str(vehicle_location_selected.get("serial", "")) == serial and tracking_selected_station.is_empty():
+		_render_vehicle_location_details(vehicle_location_selected)
+	_show_warning("Resultado do SMS", "Solicitação de SMS aceita; isso não confirma entrega nem recuperação. Consulte o histórico e novas comunicações." if result.get("ok", false) else "Envio não confirmado. Verifique o histórico antes de tentar novamente.")

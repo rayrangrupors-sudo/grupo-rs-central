@@ -61,7 +61,7 @@ const CODEX_ESCALATION_TIMEOUT_SECONDS := 75.0
 const DEFAULT_AUTH_USER := "lucasabm"
 const DEFAULT_AUTH_SALT := "grupo-rs-central-v1"
 const DEFAULT_AUTH_PASSWORD_HASH := "8b8be979780a3d27da85579c5398e07b6acd78b73e0e6ac0c4ea8adebc78e6fc"
-const ACTIVE_SCOPE_SECTIONS := ["dashboard", "inventory", "vehicle_location", "monitor_4g", "bulk", "settings"]
+const ACTIVE_SCOPE_SECTIONS := ["dashboard", "inventory", "vehicle_location", "monitor_4g", "bulk", "settings", "sms_panel"]
 const TABLE_PAGE_SIZE := 10
 const SYSTEM_LOG_PAGE_SIZE := 20
 # A referencia visual do log usa uma lista curta de eventos recentes. Mantemos
@@ -346,7 +346,11 @@ class ServerHealthCore:
 	func _ready() -> void:
 		custom_minimum_size = Vector2(300, 190)
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
-		set_process(true)
+		visibility_changed.connect(_sync_processing)
+		_sync_processing()
+
+	func _sync_processing() -> void:
+		set_process(is_visible_in_tree())
 
 	func set_health(next_state: String, next_latency_ms: int, next_pending: bool) -> void:
 		state = next_state
@@ -581,7 +585,13 @@ class BancoLocalSQLTopbarPulse:
 	func _init() -> void:
 		custom_minimum_size = Vector2(34, 34)
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
-		set_process(true)
+
+	func _ready() -> void:
+		visibility_changed.connect(_sync_processing)
+		_sync_processing()
+
+	func _sync_processing() -> void:
+		set_process(is_visible_in_tree())
 
 	func set_status(next_state: String) -> void:
 		state = next_state
@@ -640,7 +650,13 @@ class MonitorStageIndicator:
 	func _init() -> void:
 		custom_minimum_size = Vector2(118, 34)
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
-		set_process(true)
+
+	func _ready() -> void:
+		visibility_changed.connect(_sync_processing)
+		_sync_processing()
+
+	func _sync_processing() -> void:
+		set_process(is_visible_in_tree())
 
 	func set_state(next_stage: int, next_color: Color) -> void:
 		active_stage = clampi(next_stage, 0, 3)
@@ -1594,6 +1610,10 @@ var experttexting_usage_ledger: Dictionary = {}
 var experttexting_seen_inbox: Dictionary = {}
 const SMS_PANEL_HISTORY_LIMIT := 5000
 var sms_panel_events: Array[Dictionary] = []
+var sms_recovery_check_running := false
+var sms_recovery_report_open := false
+const SMS_RECOVERY_CHECK_COOLDOWN_SECONDS := 900
+var sms_panel_page := 0
 var sms_panel_status_filter := "Todos"
 var sms_panel_origin_filter := "Todos"
 var sms_panel_search_filter := ""
@@ -1633,12 +1653,31 @@ func _ready() -> void:
 	app_theme.default_font_size = 18
 	app_theme.set_constant("icon_max_width", "Button", 22)
 	theme = app_theme
+	get_tree().node_added.connect(_on_app_scroll_node_added)
 	_show_branch_selector()
 	await get_tree().process_frame
 	await _play_rs_intro()
 	var update_bootstrap := _update_bootstrap()
 	if update_bootstrap != null:
 		update_bootstrap.call("mark_boot_success")
+
+func _on_app_scroll_node_added(node: Node) -> void:
+	if node is ScrollContainer or node is ScrollBar:
+		call_deferred("_apply_hidden_app_scrollbar", node)
+
+
+func _apply_hidden_app_scrollbar(node: Node) -> void:
+	if not is_instance_valid(node) or not is_ancestor_of(node):
+		return
+	if node is ScrollContainer:
+		var scroll := node as ScrollContainer
+		if scroll.vertical_scroll_mode != ScrollContainer.SCROLL_MODE_DISABLED:
+			scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
+		if scroll.horizontal_scroll_mode != ScrollContainer.SCROLL_MODE_DISABLED:
+			scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
+	elif node is ScrollBar:
+		_hide_system_log_scrollbar(node as ScrollBar)
+
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("EXIT"):
@@ -2813,10 +2852,15 @@ func _grupo_rs_client_lookup_url(client_name: String) -> String:
 func _grupo_rs_vehicle_location_url(client_id: String, plate_value: String, normalized_plate: String) -> String:
 	if not _grupo_rs_supports_modern_api():
 		return ""
+	# JSON numeric IDs can arrive as integral floats (e.g. "123.0").
+	# This endpoint binds cliente to an SQL integer; never send the decimal form.
+	var normalized_client := _grupo_rs_api_numeric_string_value({"id": client_id}, ["id"])
+	if normalized_client != "" and (not normalized_client.is_valid_int() or int(normalized_client) <= 0):
+		return ""
 	var root := selected_branch_grupo_rs_base_url.replace("/cadastro/", "/")
 	return "%sget_data.php?acao=veiculos&cliente=%s&mapa_rapido=1&leve=1&tela=localizacao&hodometro=1&ultima_posicao=1&placa=%s&placa_limpa=%s&placa_normalizada=%s" % [
 		root,
-		client_id.uri_encode(),
+		normalized_client.uri_encode(),
 		plate_value.uri_encode(),
 		normalized_plate.uri_encode(),
 		normalized_plate.uri_encode(),
@@ -3019,25 +3063,26 @@ func _show_login_screen() -> void:
 
 	var background := ColorRect.new()
 	background.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	background.color = BG
+	background.color = Color("#eaf3fc")
 	add_child(background)
 
 	var center := MarginContainer.new()
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	center.add_theme_constant_override("margin_left", 165)
-	center.add_theme_constant_override("margin_right", 165)
-	center.add_theme_constant_override("margin_top", 95)
-	center.add_theme_constant_override("margin_bottom", 95)
+	center.add_theme_constant_override("margin_left", 36)
+	center.add_theme_constant_override("margin_right", 36)
+	center.add_theme_constant_override("margin_top", 32)
+	center.add_theme_constant_override("margin_bottom", 32)
 	add_child(center)
 
 	var columns := HBoxContainer.new()
 	columns.alignment = BoxContainer.ALIGNMENT_CENTER
-	columns.add_theme_constant_override("separation", 58)
+	columns.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	columns.add_theme_constant_override("separation", 96)
 	center.add_child(columns)
 
 	var brand_panel := PanelContainer.new()
-	brand_panel.custom_minimum_size = Vector2(620, 610)
-	brand_panel.add_theme_stylebox_override("panel", _style_box(PORTAL_BLUE, PORTAL_BLUE, 0, 14, true))
+	brand_panel.custom_minimum_size = Vector2(480, 640)
+	brand_panel.add_theme_stylebox_override("panel", _style_box(Color("#072a50"), Color("#254e76"), 1, 20))
 	columns.add_child(brand_panel)
 
 	var brand_margin := MarginContainer.new()
@@ -3054,13 +3099,13 @@ func _show_login_screen() -> void:
 
 	var brand_logo := TextureRect.new()
 	brand_logo.texture = LOGO_TEXTURE
-	brand_logo.custom_minimum_size = Vector2(330, 190)
+	brand_logo.custom_minimum_size = Vector2(300, 280)
 	brand_logo.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
 	brand_logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	brand_stack.add_child(brand_logo)
 
 	var brand_title := Label.new()
-	brand_title.text = "GRUPO RS"
+	brand_title.text = "Grupo RS"
 	brand_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	brand_title.add_theme_font_override("font", UI_FONT)
 	brand_title.add_theme_font_size_override("font_size", 38)
@@ -3068,16 +3113,16 @@ func _show_login_screen() -> void:
 	brand_stack.add_child(brand_title)
 
 	var brand_sub := Label.new()
-	brand_sub.text = "Central de rastreadores e estoque"
+	brand_sub.text = "Acesse sua conta"
 	brand_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	brand_sub.add_theme_font_override("font", UI_FONT)
-	brand_sub.add_theme_font_size_override("font_size", 18)
+	brand_sub.add_theme_font_size_override("font_size", 24)
 	brand_sub.add_theme_color_override("font_color", Color("#c6d7e6"))
 	brand_stack.add_child(brand_sub)
 
 	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(420, 0)
-	panel.add_theme_stylebox_override("panel", _style_box(SURFACE, BORDER, 1, 14, true))
+	panel.custom_minimum_size = Vector2(420, 640)
+	panel.add_theme_stylebox_override("panel", _style_box(Color("#df7417"), Color("#efa45d"), 2, 20))
 	columns.add_child(panel)
 
 	var margin := MarginContainer.new()
@@ -3093,29 +3138,50 @@ func _show_login_screen() -> void:
 	margin.add_child(stack)
 
 	var title := Label.new()
-	title.text = "Entrar no sistema"
+	title.text = "ACESSAR O SISTEMA"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_font_override("font", UI_FONT)
-	title.add_theme_font_size_override("font_size", 27)
-	title.add_theme_color_override("font_color", TEXT)
+	title.add_theme_font_size_override("font_size", 25)
+	title.add_theme_color_override("font_color", Color.WHITE)
 	stack.add_child(title)
 
 	var sub := Label.new()
-	sub.text = "Acesso seguro para operadores autorizados."
+	sub.text = "Acesse sua conta"
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	sub.add_theme_font_override("font", UI_FONT)
-	sub.add_theme_font_size_override("font_size", 14)
-	sub.add_theme_color_override("font_color", MUTED)
+	sub.add_theme_font_size_override("font_size", 20)
+	sub.add_theme_color_override("font_color", Color("#fff0df"))
 	stack.add_child(sub)
 
-	login_user_input = _make_login_input("Usuario autorizado no sistema")
+	login_user_input = _make_login_input("Usuário")
+	login_user_input.tooltip_text = "Usuário autorizado no sistema"
 	login_user_input.text = _remembered_login()
 	login_user_input.text_submitted.connect(func(_value): _attempt_login())
 	stack.add_child(login_user_input)
 
 	login_password_input = _make_login_input("Senha", true)
 	login_password_input.text_submitted.connect(func(_value): _attempt_login())
-	stack.add_child(login_password_input)
+	var password_row := HBoxContainer.new()
+	password_row.add_theme_constant_override("separation", 6)
+	login_password_input.custom_minimum_size.x = 0
+	login_password_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	password_row.add_child(login_password_input)
+	var reveal := Button.new()
+	reveal.text = "Mostrar"
+	reveal.tooltip_text = "Mostrar ou ocultar senha"
+	reveal.custom_minimum_size = Vector2(78, 52)
+	reveal.toggle_mode = true
+	reveal.add_theme_font_size_override("font_size", 12)
+	reveal.add_theme_color_override("font_color", PORTAL_BLUE)
+	reveal.add_theme_color_override("font_hover_color", PORTAL_BLUE)
+	for state in ["normal", "hover", "pressed", "hover_pressed", "focus"]:
+		reveal.add_theme_stylebox_override(state, _style_box(Color("#f0f5fc"), Color("#c7d5e6"), 1, 9))
+	reveal.toggled.connect(func(shown: bool):
+		login_password_input.secret = not shown
+		reveal.text = "Ocultar" if shown else "Mostrar"
+	)
+	password_row.add_child(reveal)
+	stack.add_child(password_row)
 
 	login_error_label = Label.new()
 	login_error_label.text = ""
@@ -3123,29 +3189,30 @@ func _show_login_screen() -> void:
 	login_error_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	login_error_label.add_theme_font_override("font", UI_FONT)
 	login_error_label.add_theme_font_size_override("font_size", 17)
-	login_error_label.add_theme_color_override("font_color", RED)
+	login_error_label.add_theme_color_override("font_color", Color("#49200a"))
 	stack.add_child(login_error_label)
 
 	remember_user_check = CheckBox.new()
-	remember_user_check.text = "Lembrar usuario"
+	remember_user_check.text = "Lembrar usuário"
 	remember_user_check.button_pressed = login_user_input.text.strip_edges() != ""
 	remember_user_check.custom_minimum_size = Vector2(350, 34)
 	remember_user_check.add_theme_font_override("font", UI_FONT)
 	remember_user_check.add_theme_font_size_override("font_size", 16)
-	remember_user_check.add_theme_color_override("font_color", TEXT)
+	for state in ["font_color", "font_hover_color", "font_pressed_color", "font_hover_pressed_color", "font_focus_color"]:
+		remember_user_check.add_theme_color_override(state, Color.WHITE)
 	stack.add_child(remember_user_check)
 
-	stack.add_child(_make_login_button("Entrar", ORANGE, Color.WHITE, _attempt_login))
+	stack.add_child(_make_login_button("Entrar", PORTAL_BLUE, Color.WHITE, _attempt_login))
 
 	var branch := Label.new()
 	branch.text = "RS %s" % selected_branch_name
 	branch.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	branch.add_theme_font_override("font", UI_FONT)
 	branch.add_theme_font_size_override("font_size", 17)
-	branch.add_theme_color_override("font_color", MUTED)
+	branch.add_theme_color_override("font_color", Color("#fff0df"))
 	stack.add_child(branch)
 
-	stack.add_child(_make_login_button("Voltar para o inicio", Color.TRANSPARENT, ORANGE, _show_branch_selector, true))
+	stack.add_child(_make_login_button("Voltar para as filiais", Color.TRANSPARENT, Color.WHITE, _show_branch_selector, true))
 	login_user_input.grab_focus()
 	_animate_screen_card(panel, stack)
 
@@ -3620,6 +3687,8 @@ func _build_sidebar() -> Control:
 		# O item Mapa Grande abre a tela combinada de localização dos veículos.
 		# O estado visual continua usando a chave monitor_4g para preservar o menu.
 		list.add_child(_make_sidebar_button("Mapa Grande", "localizacao", "monitor_4g", _show_vehicle_location_monitor))
+	if _branch_supports_sms():
+		list.add_child(_make_sidebar_button("Painel SMS", "sms", "sms_panel", _show_sms_panel))
 	list.add_child(_make_sidebar_equipment_group())
 	var section_divider := HSeparator.new()
 	section_divider.add_theme_constant_override("separation", 8)
@@ -3923,7 +3992,16 @@ func _set_page_context(section: String, title: String, subtitle: String = "") ->
 	var previous_section := current_section
 	if previous_section == "inventory" and section != "inventory":
 		_clear_inventory_visible_scope()
+	if previous_section == "vehicle_location" and section != "vehicle_location":
+		vehicle_location_query_generation += 1
+		vehicle_location_query_queue.clear()
+		vehicle_location_pending_queries.clear()
+		vehicle_location_refreshing = false
+		st310_location_polling = false
 	current_section = section
+	_update_page_scoped_timers()
+	if is_instance_valid(topbar_panel):
+		topbar_panel.visible = section != "sms_panel"
 	if is_instance_valid(topbar_title_label):
 		topbar_title_label.text = title
 	if is_instance_valid(topbar_subtitle_label):
@@ -3973,6 +4051,8 @@ func _make_sidebar_icon(icon_kind: String, color: Color) -> Control:
 
 func _sidebar_icon_path(icon_kind: String) -> String:
 	match icon_kind:
+		"sms":
+			return ICON_DIR + "mensagem.svg"
 		"dashboard":
 			return ICON_DIR + "navigation/home.svg"
 		"localizacao":
@@ -4255,14 +4335,6 @@ func _build_topbar() -> Control:
 	topbar_subtitle_label.add_theme_font_size_override("font_size", 11)
 	topbar_subtitle_label.add_theme_color_override("font_color", AppDesignSystem.MUTED)
 	left_slot.add_child(topbar_subtitle_label)
-
-	var account := HBoxContainer.new()
-	account.alignment = BoxContainer.ALIGNMENT_END
-	account.add_theme_constant_override("separation", 8)
-	row.add_child(account)
-
-	account.add_child(_make_cloud_status_button())
-	account.add_child(_make_user_widget())
 
 	return panel
 
@@ -4819,7 +4891,18 @@ func _setup_st310_location_poll_timer() -> void:
 	st310_location_poll_timer.one_shot = false
 	st310_location_poll_timer.timeout.connect(_poll_st310_location_packet)
 	add_child(st310_location_poll_timer)
-	st310_location_poll_timer.start()
+	_update_page_scoped_timers()
+
+
+func _update_page_scoped_timers() -> void:
+	# Consultas de tela devem existir somente enquanto a tela correspondente
+	# estiver ativa. Servicos operacionais globais continuam independentes.
+	if st310_location_poll_timer != null and is_instance_valid(st310_location_poll_timer):
+		if current_section == "vehicle_location":
+			if st310_location_poll_timer.is_stopped():
+				st310_location_poll_timer.start()
+		elif not st310_location_poll_timer.is_stopped():
+			st310_location_poll_timer.stop()
 
 
 func _poll_st310_location_packet() -> void:
@@ -6472,6 +6555,7 @@ func _sms_panel_record_send(serial: String, phone: String, result: Dictionary, o
 	var provider_status := str(result.get("provider_status", result.get("status", ""))).strip_edges().to_upper()
 	var status := _sms_panel_status_label(provider_status, ok)
 	var now := Time.get_datetime_dict_from_system()
+	var sms_product := _local_product_for_serial(serial)
 	var event := {
 		"id": str(result.get("message_id", "")) if str(result.get("message_id", "")).strip_edges() != "" else "%s-%s-%s" % [str(Time.get_unix_time_from_system()), str(Time.get_ticks_msec()), str(serial)],
 		"serial": _digits_only(serial),
@@ -6486,6 +6570,11 @@ func _sms_panel_record_send(serial: String, phone: String, result: Dictionary, o
 		"time": "%02d:%02d:%02d" % [int(now.get("hour", 0)), int(now.get("minute", 0)), int(now.get("second", 0))],
 		"error": str(result.get("message", "")) if not ok else "",
 		"message_preview": message.strip_edges().left(80),
+		"plate": str(sms_product.get("plate", sms_product.get("placa", ""))).strip_edges(),
+		"recovery_status": "pending" if ok else "not_applicable",
+		"recovery_checked_at": 0,
+		"recovery_first_communication": "",
+		"recovery_last_communication": "",
 	}
 	sms_panel_events.push_front(event)
 	_prune_sms_panel_events()
@@ -7525,29 +7614,29 @@ func _evaluate_auto_reset_grupo_rs_maintenance_product(product: Dictionary) -> D
 	return {"checked": true, "stale": true, "errors": true}
 
 
-func _send_grupo_rs_sms_manual_queue(phone: String, serial: String, apn: String, command: String) -> Dictionary:
+func _send_grupo_rs_sms_manual_queue(phone: String, serial: String, apn: String, command: String, origin: String = "Programa") -> Dictionary:
 	if not _branch_supports_sms():
 		var disabled := {"ok": false, "message": "SMS desativado para esta base."}
-		_sms_panel_record_send(serial, phone, disabled, "Programa", command)
+		_sms_panel_record_send(serial, phone, disabled, origin, command)
 		return disabled
 	if _experttexting_is_enabled() and _experttexting_is_configured():
 		var expert_result := await _experttexting_send_sms(phone, command)
-		_sms_panel_record_send(serial, phone, expert_result, "Programa", command)
+		_sms_panel_record_send(serial, phone, expert_result, origin, command)
 		return expert_result
 	if not _grupo_rs_supports_modern_api():
 		var unsupported := {"ok": false, "message": "Fila SMS Manual disponivel somente no Grupo RS novo."}
-		_sms_panel_record_send(serial, phone, unsupported, "Programa", command)
+		_sms_panel_record_send(serial, phone, unsupported, origin, command)
 		return unsupported
 	var clean_phone := _format_grupo_rs_sms_phone(phone)
 	var clean_serial := _digits_only(serial)
 	if clean_phone == "" or not _manual_sms_serial_is_024(clean_serial) or command.strip_edges() == "":
 		var invalid := {"ok": false, "message": "Dados insuficientes para SMS manual."}
-		_sms_panel_record_send(serial, phone, invalid, "Programa", command)
+		_sms_panel_record_send(serial, phone, invalid, origin, command)
 		return invalid
 	if not modern_grupo_rs_logged_in:
 		var login := await _modern_grupo_rs_login()
 		if not bool(login.get("ok", false)):
-			_sms_panel_record_send(serial, phone, login, "Programa", command)
+			_sms_panel_record_send(serial, phone, login, origin, command)
 			return login
 
 	var url := _modern_grupo_rs_url("/sms_manual.php?telefone=%s&equipamento=%s&apn=%s" % [
@@ -7563,7 +7652,7 @@ func _send_grupo_rs_sms_manual_queue(phone: String, serial: String, apn: String,
 		"mensagem": command.strip_edges(),
 	}, headers)
 	if not bool(response.get("ok", false)):
-		_sms_panel_record_send(serial, phone, response, "Programa", command)
+		_sms_panel_record_send(serial, phone, response, origin, command)
 		return response
 	var body := str(response.get("body", "")).to_lower()
 	if body.contains("login.php") or body.contains("senha"):
@@ -7578,17 +7667,17 @@ func _send_grupo_rs_sms_manual_queue(phone: String, serial: String, apn: String,
 				"mensagem": command.strip_edges(),
 			}, headers)
 			if not bool(response.get("ok", false)):
-				_sms_panel_record_send(serial, phone, response, "Programa", command)
+				_sms_panel_record_send(serial, phone, response, origin, command)
 				return response
 			body = str(response.get("body", "")).to_lower()
 		if body.contains("login.php") or body.contains("senha"):
 			var expired := {"ok": false, "message": "Sessao do Grupo RS expirou."}
-			_sms_panel_record_send(serial, phone, expired, "Programa", command)
+			_sms_panel_record_send(serial, phone, expired, origin, command)
 			return expired
 	if body.contains("acesso negado"):
 		modern_grupo_rs_logged_in = false
 		var denied := {"ok": false, "message": "Grupo RS recusou o envio; confira login do sistema novo."}
-		_sms_panel_record_send(serial, phone, denied, "Programa", command)
+		_sms_panel_record_send(serial, phone, denied, origin, command)
 		return denied
 	# HTTP 200 nao significa fila aceita: a tela precisa trazer evidencia do envio.
 	var accepted_markers := ["sucesso", "enviado", "fila", "agendado", "confirmado", "mensagem"]
@@ -7599,10 +7688,10 @@ func _send_grupo_rs_sms_manual_queue(phone: String, serial: String, apn: String,
 			break
 	if not accepted:
 		var unconfirmed := {"ok": false, "message": "O portal respondeu sem confirmar a entrada na fila SMS."}
-		_sms_panel_record_send(serial, phone, unconfirmed, "Programa", command)
+		_sms_panel_record_send(serial, phone, unconfirmed, origin, command)
 		return unconfirmed
 	var queued := {"ok": true, "provider_status": "QUEUED", "body": str(response.get("body", ""))}
-	_sms_panel_record_send(serial, phone, queued, "Programa", command)
+	_sms_panel_record_send(serial, phone, queued, origin, command)
 	return queued
 
 
@@ -9537,8 +9626,10 @@ func _refresh_vehicle_location_queue_ui() -> void:
 
 
 func _debounced_vehicle_location_query(generation: int) -> void:
+	if current_section != "vehicle_location":
+		return
 	await get_tree().create_timer(0.35).timeout
-	if generation != vehicle_location_query_generation:
+	if current_section != "vehicle_location" or generation != vehicle_location_query_generation:
 		return
 	await _refresh_vehicle_location_view(generation)
 
@@ -9945,6 +10036,12 @@ func _vehicle_location_api_row_matches_query(row: Dictionary, query: String) -> 
 
 
 func _refresh_vehicle_location_view(expected_generation: int = -1) -> void:
+	if current_section != "vehicle_location":
+		return
+	if expected_generation < 0:
+		expected_generation = vehicle_location_query_generation
+	if expected_generation != vehicle_location_query_generation:
+		return
 	if vehicle_location_refreshing:
 		return
 	vehicle_location_last_query_error_count = 0
@@ -9993,6 +10090,8 @@ func _refresh_vehicle_location_view(expected_generation: int = -1) -> void:
 	var api_error_count := 0
 	for lookup_query in lookup_queries:
 		var api_result: Dictionary = await _fetch_vehicle_location_api_rows_smart(lookup_query)
+		if current_section != "vehicle_location":
+			return
 		vehicle_location_last_query_diagnostic = _vehicle_location_sanitized_diagnostic(
 			api_result,
 			expected_generation,
@@ -10019,6 +10118,8 @@ func _refresh_vehicle_location_view(expected_generation: int = -1) -> void:
 				seen_rows[row_key] = true
 			if not vehicle_location_api_exclusive:
 				var operator_info := await _resolve_vehicle_location_operator(normalized_row)
+				if current_section != "vehicle_location":
+					return
 				if expected_generation >= 0 and expected_generation != vehicle_location_query_generation:
 					vehicle_location_refreshing = false
 					call_deferred("_refresh_vehicle_location_view", vehicle_location_query_generation)
@@ -14911,6 +15012,7 @@ func _build_dashboard_view() -> Control:
 
 	var scroll := ScrollContainer.new()
 	scroll.name = "DashboardScroll"
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
 	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -14971,14 +15073,14 @@ func _build_dashboard_view() -> Control:
 	var welcome_actions := HBoxContainer.new()
 	welcome_actions.alignment = BoxContainer.ALIGNMENT_END
 	welcome_actions.add_theme_constant_override("separation", 8)
-	var verify_button := _make_action_button("Verificar conexão", AppDesignSystem.BLUE_SOFT, Color("#C8DFF3"), AppDesignSystem.NAVY, Vector2(178, 42), _refresh_dashboard_data)
-	verify_button.icon = load(ICON_DIR + "sem_internet.svg")
-	verify_button.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	welcome_actions.add_child(verify_button)
-	var refresh_button := _make_action_button("Atualizar dados", AppDesignSystem.BLUE, AppDesignSystem.BLUE, Color.WHITE, Vector2(166, 42), _refresh_dashboard_data)
+	var refresh_button := _make_action_button("Atualizar", Color.WHITE, Color("#D8E4EF"), AppDesignSystem.TEXT, Vector2(95, 42), _refresh_dashboard_data)
 	refresh_button.icon = load(ICON_DIR + "atualizar.svg")
 	refresh_button.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	welcome_actions.add_child(refresh_button)
+	var branch_button := _make_action_button("Trocar filial", AppDesignSystem.BLUE, AppDesignSystem.BLUE, Color.WHITE, Vector2(152, 42), _show_branch_selector)
+	branch_button.icon = load(ICON_DIR + "atualizar.svg")
+	branch_button.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	welcome_actions.add_child(branch_button)
 	welcome_row.add_child(welcome_actions)
 
 	var metrics := HBoxContainer.new()
@@ -15009,8 +15111,6 @@ func _build_dashboard_view() -> Control:
 
 	charts.add_child(_build_operator_panel(stats))
 	charts.add_child(_build_situation_panel(stats))
-	root.add_child(_build_diagnostics_panel(diagnostics))
-
 	return scroll
 
 
@@ -22817,7 +22917,7 @@ func _grupo_rs_api_normalize_location(raw: Dictionary) -> Dictionary:
 		"vehicle_type": _grupo_rs_api_string_value(data, ["tipoVeiculo", "TipoVeiculo", "tipo_veiculo", "vehicle_type"]),
 		"status": _grupo_rs_api_string_value(data, ["status", "Status", "situacao", "Situacao", "situacao_estoque", "status_estoque"]),
 		"chip": _grupo_rs_api_string_value(data, ["chip", "Chip", "numero_chip", "NumeroChip", "iccid", "ICCID"]),
-		"phone": _grupo_rs_api_string_value(data, ["telefone", "Telefone", "phone", "numero_telefone", "NumeroTelefone"]),
+		"phone": _grupo_rs_api_string_value(data, ["telefone", "Telefone", "phone", "numeroTelefone", "numero_telefone", "NumeroTelefone"]),
 		"operator": _grupo_rs_api_string_value(data, ["operadora", "Operadora", "operator", "carrier"]),
 		"apn": _grupo_rs_api_string_value(data, ["apn", "APN"]),
 		# As coordenadas sao extraidas do retorno oficial da API; o decoder
@@ -23090,7 +23190,12 @@ func _grupo_rs_api_find_vehicle(plate: String = "", serial: String = "", force_r
 				"response_code": response_code,
 				"not_found": response_code == 404,
 			}
-		var payload: Variant = JSON.parse_string(str(response.get("body", "")))
+		var association_json := JSON.new()
+		if association_json.parse(str(response.get("body", ""))) != OK:
+			return {"ok": false, "message": "Resposta inválida ao consultar associação.", "parse_ok": false}
+		var payload: Variant = association_json.data
+		if not (payload is Dictionary or payload is Array) or (payload is Dictionary and (payload.get("success", true) == false or payload.has("erro") or payload.has("error"))):
+			return {"ok": false, "message": "Falha ao consultar associação na API.", "parse_ok": false}
 		for raw in _grupo_rs_api_extract_rows(payload):
 			normalized.append(_grupo_rs_api_normalize_location(raw))
 		if not normalized.is_empty():
@@ -26317,6 +26422,99 @@ func _show_sms_panel() -> void:
 	_set_page_context("sms_panel", "Painel SMS", "Envios, status e consumo da operacao em tempo real")
 	_set_content_margins(28, 22, 28, 22)
 	_set_content(_build_sms_panel_view(), true)
+	if not sms_recovery_report_open and not sms_recovery_check_running:
+		call_deferred("_sms_recovery_check_pending")
+
+
+func _sms_recovery_check_pending() -> void:
+	if sms_recovery_check_running or current_section != "sms_panel":
+		return
+	sms_recovery_check_running = true
+	var now := _auto_reset_now_unix()
+	var changed := false
+	var checked := 0
+	for index in range(sms_panel_events.size()):
+		if current_section != "sms_panel":
+			break
+		var event: Dictionary = sms_panel_events[index]
+		if str(event.get("recovery_status", "pending")) in ["normalized", "not_applicable"]:
+			continue
+		if now - int(event.get("recovery_checked_at", 0)) < SMS_RECOVERY_CHECK_COOLDOWN_SECONDS:
+			continue
+		if checked >= 5:
+			break
+		checked += 1
+		var serial := str(event.get("serial", ""))
+		var plate := str(event.get("plate", ""))
+		if plate == "":
+			var product := _local_product_for_serial(serial)
+			plate = str(product.get("plate", product.get("placa", ""))).strip_edges()
+			event["plate"] = plate
+		if serial == "" and plate == "":
+			event["recovery_status"] = "unavailable"
+			event["recovery_checked_at"] = now
+			sms_panel_events[index] = event
+			changed = true
+			continue
+		var result := await _grupo_rs_api_find_location(serial, plate, "", false, 10)
+		if current_section != "sms_panel":
+			break
+		event["recovery_checked_at"] = now
+		if bool(result.get("ok", false)) and not (result.get("location", {}) as Dictionary).is_empty():
+			var location: Dictionary = result.get("location", {})
+			var communication := str(location.get("updated_at", "")).strip_edges()
+			var communication_unix := _grupo_rs_datetime_to_unix(communication)
+			var sms_unix := _grupo_rs_datetime_to_unix(str(event.get("timestamp", "")))
+			if communication_unix > sms_unix:
+				var previous := str(event.get("recovery_last_communication", ""))
+				if str(event.get("recovery_first_communication", "")) == "":
+					event["recovery_first_communication"] = communication
+				event["recovery_last_communication"] = communication
+				event["recovery_ignition"] = location.get("ignition", "")
+				if previous != "" and _grupo_rs_datetime_to_unix(communication) > _grupo_rs_datetime_to_unix(previous):
+					var gap := communication_unix - _grupo_rs_datetime_to_unix(previous)
+					var ignition_on := str(location.get("ignition", "")).to_lower() in ["1", "true", "ligado", "on"]
+					event["recovery_status"] = "normalized" if gap <= (900 if ignition_on else 7200) else "observing"
+				else:
+					event["recovery_status"] = "observing"
+			else:
+				event["recovery_status"] = "pending"
+		else:
+			event["recovery_status"] = "unavailable"
+		sms_panel_events[index] = event
+		changed = true
+		await get_tree().process_frame
+	sms_recovery_check_running = false
+	if changed:
+		_save_auto_reset_state()
+		if current_section == "sms_panel":
+			_show_sms_panel()
+
+
+func _open_sms_recovery_report() -> void:
+	sms_recovery_report_open = true
+	_show_sms_panel()
+
+
+func _close_sms_recovery_report() -> void:
+	sms_recovery_report_open = false
+	_show_sms_panel()
+
+
+func _export_sms_recovery_xlsx() -> void:
+	var rows: Array = [["Placa", "Serie", "Origem do SMS", "Data do SMS", "Primeira comunicacao", "Ultima comunicacao", "Estado", "Ultima verificacao"]]
+	for event in sms_panel_events:
+		if str(event.get("recovery_status", "pending")) == "not_applicable":
+			continue
+		rows.append([str(event.get("plate", "")), str(event.get("serial", "")), str(event.get("origin", "")), str(event.get("timestamp", "")), str(event.get("recovery_first_communication", "")), str(event.get("recovery_last_communication", "")), str(event.get("recovery_status", "")), Time.get_datetime_string_from_unix_time(int(event.get("recovery_checked_at", 0))) if int(event.get("recovery_checked_at", 0)) > 0 else ""])
+	if rows.size() <= 1:
+		_show_warning("Retorno apos SMS", "Nao ha acompanhamentos para exportar.")
+		return
+	var path := _downloads_export_path("retorno_apos_sms.xlsx")
+	if _write_xlsx(path, "Retorno apos SMS", rows):
+		_show_success("Retorno apos SMS", "Relatorio exportado em XLSX:\n%s" % path)
+	else:
+		_show_error("Retorno apos SMS", "Nao foi possivel criar o arquivo XLSX.")
 
 
 func _sms_panel_events_filtered() -> Array[Dictionary]:
@@ -26360,10 +26558,17 @@ func _clear_sms_panel_filters() -> void:
 	sms_panel_search_filter = ""
 	sms_panel_start_date = ""
 	sms_panel_end_date = ""
+	sms_panel_status_filter = "Todos"
+	sms_panel_origin_filter = "Todos"
+	sms_panel_page = 0
 	_show_sms_panel()
 
 
 func _build_sms_panel_view() -> Control:
+	return preload("res://src/features/sms/sms_panel_view.gd").build(self)
+
+
+func _build_sms_panel_view_legacy() -> Control:
 	var root := VBoxContainer.new()
 	root.name = "SmsPanelView"
 	root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -31068,7 +31273,6 @@ func _build_arya_config_view() -> Control:
 	nav_title.add_theme_font_size_override("font_size", 10)
 	nav_title.add_theme_color_override("font_color", MUTED)
 	nav.add_child(nav_title)
-	nav.add_child(_make_config_nav_button("Servidor", "local_database"))
 	nav.add_child(_make_config_nav_button("Arya", "arya"))
 	nav.add_child(_make_config_nav_button("Grupo RS", "grupo_rs"))
 	var regional_title := Label.new()
@@ -31079,10 +31283,6 @@ func _build_arya_config_view() -> Control:
 	regional_title.add_theme_color_override("font_color", MUTED)
 	regional_title.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
 	nav.add_child(regional_title)
-	nav.add_child(_make_config_nav_button("Araguaina", "grupo_rs_araguaina"))
-	nav.add_child(_make_config_nav_button("Acailandia", "grupo_rs_acailandia"))
-	nav.add_child(_make_config_nav_button("Maraba", "grupo_rs_maraba"))
-	nav.add_child(_make_config_nav_button("Link Solutions", "linksolutions"))
 	if _branch_supports_sms():
 		nav.add_child(_make_config_nav_button("SMS", "sms"))
 	nav.add_child(_make_config_nav_button("Atualizacoes", "updates"))
@@ -36616,12 +36816,21 @@ func _request_linksolutions_login_once() -> Dictionary:
 		LINKSOLUTIONS_HTTP_TIMEOUT_SECONDS
 	)
 	if not bool(response.get("ok", false)):
-		return {"ok": false, "status": "login", "message": "Login da Linksolutions falhou: %s" % str(response.get("message", ""))}
+		var failure := str(response.get("message", ""))
+		var http_code := int(response.get("response_code", 0))
+		return {"ok": false, "status": "login" if http_code in [401,403] else "transient", "message": "Link Solutions: consulta indisponível. %s" % failure}
 
 	var auth_header := _http_header_value(response.get("headers", PackedStringArray()), "Authorization")
 	var token := auth_header
 	if token.begins_with("Bearer "):
 		token = token.substr(7).strip_edges()
+	if token == "":
+		var payload: Variant = JSON.parse_string(str(response.get("body", "")))
+		if payload is Dictionary:
+			for key in ["id_token", "access_token", "token"]:
+				if payload.get(key) is String and not str(payload[key]).strip_edges().is_empty():
+					token = str(payload[key]).strip_edges()
+					break
 	if token == "":
 		return {"ok": false, "status": "login", "message": "Linksolutions autenticou, mas nao retornou token."}
 	_save_linksolutions_token(token)
@@ -36737,7 +36946,7 @@ func _show_arya_sms_dialog(product: Dictionary) -> void:
 		return
 
 	loading = _show_progress_dialog("SMS Manual Grupo RS", "Enviando para a fila", "%s | %s" % [phone, apn.to_upper()])
-	var result := await _send_grupo_rs_sms_manual_queue(phone, serial, apn, command)
+	var result := await _send_grupo_rs_sms_manual_queue(phone, serial, apn, command, "Estoque")
 	if is_instance_valid(loading):
 		loading.queue_free()
 
@@ -44128,7 +44337,7 @@ func _build_operator_panel(stats: Dictionary) -> Control:
 	stack.add_theme_constant_override("separation", 0)
 	panel.add_child(stack)
 
-	stack.add_child(_make_chart_header("Aparelhos por operadora", BLUE, Callable(self, "_show_list"), "Ver detalhes"))
+	stack.add_child(_make_chart_header("Aparelhos por operadora", BLUE))
 
 	var margin := MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", 28)
@@ -44319,7 +44528,7 @@ func _build_situation_panel(_stats: Dictionary) -> Control:
 	stack.add_theme_constant_override("separation", 0)
 	panel.add_child(stack)
 
-	stack.add_child(_make_chart_header("Status do banco local", GREEN, Callable(self, "_show_system_health"), "Ver diagnóstico"))
+	stack.add_child(_make_chart_header("Status do banco local", GREEN))
 
 	var margin := MarginContainer.new()
 	margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -44348,13 +44557,12 @@ func _build_situation_panel(_stats: Dictionary) -> Control:
 	server_health_core.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	core_box.add_child(server_health_core)
 
-	server_health_state_label = Label.new()
-	server_health_state_label.text = "SQLite operacional"
-	server_health_state_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	server_health_state_label.add_theme_font_override("font", UI_FONT)
-	server_health_state_label.add_theme_font_size_override("font_size", 19)
-	server_health_state_label.add_theme_color_override("font_color", BLUE)
-	core_box.add_child(server_health_state_label)
+	server_health_state_label = null
+	server_health_detail_label = null
+	server_health_connection_label = null
+	server_health_latency_label = null
+	server_health_sync_label = null
+	server_health_history_body = null
 
 	var divider := VSeparator.new()
 	divider.add_theme_constant_override("separation", 1)
@@ -44363,71 +44571,70 @@ func _build_situation_panel(_stats: Dictionary) -> Control:
 	var details := VBoxContainer.new()
 	details.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	details.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	details.alignment = BoxContainer.ALIGNMENT_CENTER
-	details.add_theme_constant_override("separation", 13)
+	details.add_theme_constant_override("separation", 10)
 	body.add_child(details)
 
-	var eyebrow := Label.new()
-	eyebrow.text = "ARMAZENAMENTO LOCAL / SQLITE"
-	eyebrow.add_theme_font_override("font", UI_FONT)
-	eyebrow.add_theme_font_size_override("font_size", 13)
-	eyebrow.add_theme_color_override("font_color", MUTED)
-	details.add_child(eyebrow)
+	var caption := Label.new()
+	caption.text = "Aparelhos em estoque"
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.add_theme_font_override("font", UI_FONT)
+	caption.add_theme_font_size_override("font_size", 13)
+	caption.add_theme_color_override("font_color", MUTED)
+	details.add_child(caption)
+	details.add_child(_make_dashboard_stock_row("Série", "Identificação", true))
 
-	server_health_detail_label = Label.new()
-	server_health_detail_label.text = "Banco local pronto\nDados da filial protegidos no SQLite"
-	server_health_detail_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	server_health_detail_label.custom_minimum_size = Vector2(330, 54)
-	server_health_detail_label.add_theme_font_override("font", UI_FONT)
-	server_health_detail_label.add_theme_font_size_override("font_size", 16)
-	server_health_detail_label.add_theme_color_override("font_color", TEXT)
-	details.add_child(server_health_detail_label)
-
-	var rule := HSeparator.new()
-	rule.add_theme_constant_override("separation", 1)
-	details.add_child(rule)
-
-	var metrics := HBoxContainer.new()
-	metrics.add_theme_constant_override("separation", 32)
-	details.add_child(metrics)
-
-	server_health_latency_label = Label.new()
-	server_health_latency_label.text = "Leitura\n--"
-	server_health_latency_label.add_theme_font_override("font", UI_FONT)
-	server_health_latency_label.add_theme_font_size_override("font_size", 15)
-	server_health_latency_label.add_theme_color_override("font_color", BLUE_DARK)
-	metrics.add_child(server_health_latency_label)
-
-	server_health_sync_label = Label.new()
-	server_health_sync_label.text = "Ultima gravacao\nAguardando"
-	server_health_sync_label.add_theme_font_override("font", UI_FONT)
-	server_health_sync_label.add_theme_font_size_override("font_size", 15)
-	server_health_sync_label.add_theme_color_override("font_color", BLUE_DARK)
-	metrics.add_child(server_health_sync_label)
-
-	var protection := Label.new()
-	protection.text = "Operacao offline disponivel"
-	protection.add_theme_font_override("font", UI_FONT)
-	protection.add_theme_font_size_override("font_size", 14)
-	protection.add_theme_color_override("font_color", GREEN)
-	server_health_connection_label = protection
-	details.add_child(protection)
-
-	var history_title := Label.new()
-	history_title.text = "Ultimas verificacoes locais"
-	history_title.add_theme_font_override("font", UI_FONT)
-	history_title.add_theme_font_size_override("font_size", 12)
-	history_title.add_theme_color_override("font_color", BLUE_DARK)
-	details.add_child(history_title)
-	server_health_history_body = VBoxContainer.new()
-	server_health_history_body.add_theme_constant_override("separation", 3)
-	details.add_child(server_health_history_body)
-	_render_dashboard_local_database_history()
+	var stock_scroll := ScrollContainer.new()
+	stock_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
+	stock_scroll.custom_minimum_size = Vector2(0, 210)
+	stock_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	stock_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	details.add_child(stock_scroll)
+	var stock_rows := VBoxContainer.new()
+	stock_rows.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	stock_rows.add_theme_constant_override("separation", 8)
+	stock_scroll.add_child(stock_rows)
+	if store != null:
+		for product in store.get_products("", "all", false):
+			if _status_key(product) != "estoque":
+				continue
+			var serial := str(product.get("imei", product.get("sku", "")))
+			var identification := _identification_plate(product)
+			if identification.is_empty():
+				identification = str(product.get("plate", "")).strip_edges()
+			stock_rows.add_child(_make_dashboard_stock_row(serial, identification if not identification.is_empty() else "—"))
+	if stock_rows.get_child_count() == 0:
+		var empty := Label.new()
+		empty.text = "Nenhum aparelho em estoque."
+		empty.add_theme_font_size_override("font_size", 13)
+		empty.add_theme_color_override("font_color", MUTED)
+		stock_rows.add_child(empty)
 
 	var local_database_sync := _local_database_sync()
 	if local_database_sync != null:
 		call_deferred("_on_local_database_status_changed", local_database_sync.call("get_status"))
 
+	return panel
+
+
+func _make_dashboard_stock_row(serial: String, identification: String, heading: bool = false) -> Control:
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(0, 48 if heading else 54)
+	panel.add_theme_stylebox_override("panel", _style_box(Color("#f6f9fc") if heading else Color.WHITE, BORDER, 1, 8))
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	panel.add_child(row)
+	for value in [serial, identification]:
+		var label := Label.new()
+		label.text = value
+		label.tooltip_text = value
+		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		label.clip_text = true
+		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		label.add_theme_font_override("font", UI_FONT)
+		label.add_theme_font_size_override("font_size", 12 if heading else 17)
+		label.add_theme_color_override("font_color", MUTED if heading else TEXT)
+		row.add_child(label)
 	return panel
 
 

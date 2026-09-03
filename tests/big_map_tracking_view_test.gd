@@ -13,6 +13,20 @@ func _init() -> void:
 	_check(query_placeholder.contains("placa") and query_placeholder.contains("série") and query_placeholder.contains("cliente"), "Placeholder não explicita placa, número de série e cliente.")
 	_check(view.monitor_select.item_count == 5, "Filtros operacionais incompletos.")
 	_check(view.camera_lock_check != null, "Controle de camera ausente.")
+	_check(view.add_button.get_parent() == view.query_input.get_parent() and view.refresh_button.get_parent() == view.query_input.get_parent(), "Pesquisa e ações não estão na mesma linha.")
+	_check(not view.get_node("TrackingErbFilters").visible, "Filtros deveriam começar recolhidos.")
+	view.advanced_button.button_pressed = true
+	_check(view.get_node("TrackingErbFilters").visible, "Botão Filtros não expande os controles.")
+	view.advanced_button.button_pressed = false
+	_check(view.erb_layer_check.get_parent().name == "TrackingMapOverlay", "ERBs não estão sobre o mapa.")
+	view.erb_layer_check.button_pressed = false
+	_check(view.erb_layer_check.text == "Mostrar ERBs", "Rótulo de ERBs não alterna.")
+	view.erb_layer_check.button_pressed = true
+	_check(view.maintenance_button != null, "Botão de manutenção ausente.")
+	view.set_maintenance_progress(true, true, {"total": 10, "processed": 4, "Processados": 4}, "4 de 10")
+	_check(view.maintenance_button.text == "Cancelar busca", "Cancelamento não aparece.")
+	_check(view.maintenance_progress.value == 4, "Progresso não atualiza.")
+	view.set_maintenance_progress(false, false, {}, "")
 	_check(view.erb_layer_check.button_pressed, "Camada de ERBs deveria iniciar ligada.")
 	_check(view.basemap_select.item_count == 1, "Interface ainda expõe mais de um mapa-base.")
 	_check(str(view.basemap_select.get_item_metadata(view.basemap_select.selected)) == "normal", "Interface não fixa OpenStreetMap.")

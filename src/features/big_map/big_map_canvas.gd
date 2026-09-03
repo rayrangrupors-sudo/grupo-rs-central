@@ -115,7 +115,7 @@ func _init() -> void:
 
 func _process(delta: float) -> void:
 	var tracking_animation := _tracking_animation_in_progress()
-	if map_ready and not navigation_loading and not tracking_animation:
+	if not navigation_loading and not tracking_animation:
 		set_process(false)
 		return
 	var redraw_requested := false

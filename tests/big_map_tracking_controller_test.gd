@@ -16,6 +16,7 @@ func _run() -> void:
 	# O controlador e instanciado sem _ready para isolar somente o Mapa Grande;
 	# isso evita iniciar timers e servicos globais do dashboard durante o teste.
 	var dashboard := Controller.new()
+	dashboard.current_section = "vehicle_location"
 	dashboard.set("vehicle_location_integration", Integration.new())
 	var view: Control = dashboard.call("_build_vehicle_location_view")
 	root.add_child(dashboard)
@@ -125,6 +126,15 @@ func _run() -> void:
 	dashboard.set("vehicle_location_last_query_error_count", 0)
 	_test_sanitized_query_diagnostics(dashboard)
 	await _test_erb_query_burst(dashboard)
+	var maintenance_rows: Array[Dictionary] = [
+		{"serial": "024TEST1", "lat": -5.5, "lng": -47.5, "ignition": 1, "maintenance": true, "updated_at": "2000-01-01 00:00:00"},
+		{"serial": "024TEST2", "lat": -5.5, "lng": -47.5, "ignition": 0, "maintenance": true},
+		{"serial": "024TEST3", "lat": -5.5, "lng": -47.5, "maintenance": true},
+	]
+	_check(dashboard._location_monitoring_status(maintenance_rows[0]).label == "Ligado", "Manutenção antiga não pode amarelar a ignição ligada.")
+	_check(dashboard._location_monitoring_status(maintenance_rows[1]).label == "Desligado", "Ignição desligada deve permanecer vermelha.")
+	dashboard.vehicle_location_filtered_rows = maintenance_rows
+	_check(dashboard._vehicle_location_rows_for_map().size() == 2, "Ignição desconhecida não deve inventar uma agulha colorida.")
 	# Os filtros substituem linhas com queue_free; deixa a fila ser drenada antes
 	# de desmontar a arvore para que o teste tambem detecte vazamentos reais.
 	await process_frame

@@ -51,6 +51,14 @@ var list_panel: PanelContainer
 var list_body: VBoxContainer
 var workspace_split: HSplitContainer
 var _popup_clear_icon: ImageTexture
+var maintenance_button: Button
+var maintenance_progress: ProgressBar
+var maintenance_status: Label
+var maintenance_cards: HBoxContainer
+var maintenance_values: Dictionary = {}
+var advanced_button: Button
+var _queue_row: HBoxContainer
+var _action_row: HBoxContainer
 
 
 func _init() -> void:
@@ -62,8 +70,10 @@ func _init() -> void:
 	_build_runtime_strip()
 	_build_erb_filters()
 	_build_metrics()
+	_build_maintenance_progress()
 	_build_map_workspace()
 	_build_vehicle_list()
+	_set_advanced(false)
 	resized.connect(_apply_responsive_layout)
 
 
@@ -109,6 +119,7 @@ func selected_erb_filters() -> Dictionary:
 
 func set_details_title(value: String) -> void:
 	if details_title != null:
+		details_title.show()
 		details_title.text = value
 
 
@@ -166,25 +177,35 @@ func _build_toolbar() -> void:
 	query_input.placeholder_text = "Pesquisar por placa, número de série ou cliente"
 	query_input.tooltip_text = "Pesquise por placa, número de série ou cliente cadastrado."
 	query_input.clear_button_enabled = true
-	query_input.custom_minimum_size = Vector2(300, 38)
-	query_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	query_input.custom_minimum_size = Vector2(380, 44)
+	query_input.size_flags_horizontal = Control.SIZE_FILL
 	_style_input(query_input)
 	row.add_child(query_input)
-	add_button = _button("Adicionar", GREEN, Color.WHITE, 110)
+	add_button = _button("ADICIONAR", BLUE, Color.WHITE, 120)
 	row.add_child(add_button)
+	refresh_button = _button("Atualizar mapa", BLUE, Color.WHITE, 125)
+	row.add_child(refresh_button)
+	var space := Control.new()
+	space.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(space)
+	advanced_button = _button("Filtros", Color("#f3f7fb"), BLUE_DARK, 65)
+	advanced_button.toggle_mode = true
+	advanced_button.toggled.connect(_set_advanced)
+	row.add_child(advanced_button)
+	maintenance_button = _button("Pontuar manutenções", YELLOW, Color.WHITE, 190)
+	row.add_child(maintenance_button)
 	var action_row := HBoxContainer.new()
+	_action_row = action_row
 	action_row.name = "TrackingActionRow"
 	action_row.add_theme_constant_override("separation", 8)
 	stack.add_child(action_row)
 	monitor_select = OptionButton.new()
 	monitor_select.name = "TrackingFilter"
 	monitor_select.custom_minimum_size = Vector2(176, 38)
-	for item in ["Todos", "Em movimento", "Parados", "Desatualizados", "Sem posição"]:
+	for item in ["Todos", "Última ignição ligada", "Última ignição desligada", "Desatualizados", "Sem posição"]:
 		monitor_select.add_item(item)
 	_style_option(monitor_select)
 	action_row.add_child(monitor_select)
-	refresh_button = _button("Atualizar agora", BLUE, Color.WHITE, 140)
-	action_row.add_child(refresh_button)
 	query_state_label = _label("Aguardando pesquisa", 10, MUTED)
 	query_state_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	query_state_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -193,6 +214,7 @@ func _build_toolbar() -> void:
 	action_row.add_child(query_state_label)
 
 	var queue_row := HBoxContainer.new()
+	_queue_row = queue_row
 	queue_row.custom_minimum_size = Vector2(0, 27)
 	queue_row.add_theme_constant_override("separation", 7)
 	stack.add_child(queue_row)
@@ -325,6 +347,59 @@ func _build_metrics() -> void:
 		row.add_child(_metric_card(str(metric[0]), metric[1]))
 
 
+func _build_maintenance_progress() -> void:
+	maintenance_status = _label("", 12, MUTED)
+	add_child(maintenance_status)
+	maintenance_status.hide()
+	maintenance_progress = ProgressBar.new()
+	maintenance_progress.custom_minimum_size.y = 6
+	maintenance_progress.show_percentage = false
+	maintenance_progress.add_theme_stylebox_override("background", _panel_style(Color("#e2ebf2"), Color.TRANSPARENT, 4))
+	maintenance_progress.add_theme_stylebox_override("fill", _panel_style(Color("#f59a20"), Color.TRANSPARENT, 4))
+	add_child(maintenance_progress)
+	maintenance_progress.hide()
+	maintenance_cards = HBoxContainer.new()
+	maintenance_cards.add_theme_constant_override("separation", 10)
+	add_child(maintenance_cards)
+	maintenance_cards.hide()
+	for definition in [["Processados", BLUE], ["Ignição ligada", GREEN], ["Ignição desligada", RED], ["Aguardando busca", Color("#7554bd")]]:
+		var card := PanelContainer.new()
+		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		card.custom_minimum_size.y = 104
+		card.add_theme_stylebox_override("panel", StyleBoxEmpty.new())
+		maintenance_cards.add_child(card)
+		var background := ColorRect.new()
+		background.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var material := ShaderMaterial.new()
+		material.shader = preload("res://src/features/big_map/maintenance_card.gdshader")
+		material.set_shader_parameter("accent", definition[1])
+		background.material = material
+		card.add_child(background)
+		background.resized.connect(func(): material.set_shader_parameter("dimensions", background.size))
+		var margin := _margin(16, 16, 10, 10)
+		card.add_child(margin)
+		var stack := VBoxContainer.new()
+		margin.add_child(stack)
+		var value := _label("0", 32, Color.WHITE)
+		stack.add_child(value)
+		stack.add_child(_label(str(definition[0]).to_upper(), 11, Color.WHITE))
+		maintenance_values[definition[0]] = value
+
+
+func set_maintenance_progress(active: bool, running: bool, counts: Dictionary, message: String) -> void:
+	maintenance_status.visible = active
+	maintenance_progress.visible = active
+	maintenance_cards.visible = active
+	get_node("TrackingMetrics").visible = not active
+	get_node("TrackingRuntime").visible = not active and advanced_button.button_pressed
+	maintenance_button.text = "Cancelar busca" if running else "Pontuar manutenções"
+	maintenance_status.text = message
+	maintenance_progress.max_value = maxi(1, int(counts.get("total", 0)))
+	maintenance_progress.value = int(counts.get("processed", 0))
+	for key in ["Processados", "Ignição ligada", "Ignição desligada", "Aguardando busca"]:
+		maintenance_values[key].text = str(counts.get(key, 0))
+
+
 func _metric_card(title_text: String, accent: Color) -> Control:
 	var panel := PanelContainer.new()
 	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -383,6 +458,13 @@ func _build_map_workspace() -> void:
 	list_toggle.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
 	list_toggle.position = Vector2(-150, -47)
 	overlay.add_child(list_toggle)
+	list_toggle.position = Vector2(-302, -47)
+	erb_layer_check.reparent(overlay)
+	erb_layer_check.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	erb_layer_check.position = Vector2(-155, -47)
+	erb_layer_check.custom_minimum_size = Vector2(145,36)
+	erb_layer_check.text = "Ocultar ERBs"
+	erb_layer_check.toggled.connect(func(enabled: bool): erb_layer_check.text = "Ocultar ERBs" if enabled else "Mostrar ERBs")
 
 	details_panel = PanelContainer.new()
 	details_panel.name = "TrackingDetailsPanel"
@@ -403,7 +485,13 @@ func _build_map_workspace() -> void:
 	details_body.name = "TrackingDetailsBody"
 	details_body.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	details_body.add_theme_constant_override("separation", 3)
-	detail_stack.add_child(details_body)
+	var details_scroll := ScrollContainer.new()
+	details_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	details_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	details_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
+	detail_stack.add_child(details_scroll)
+	details_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	details_scroll.add_child(details_body)
 	var empty_title := _label("Selecione um veículo ou ERB licenciada", 12, TEXT)
 	empty_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	details_body.add_child(empty_title)
@@ -566,15 +654,25 @@ func _apply_responsive_layout() -> void:
 	var compact := size.x < 1250.0
 	var very_compact := size.x < 1050.0
 	var details_width := 250.0 if very_compact else (285.0 if compact else 325.0)
+	query_input.custom_minimum_size.x = clampf(size.x * 0.36, 250, 590)
 	details_panel.custom_minimum_size.x = details_width
 	var available_map_width := maxf(0.0, size.x - details_width - 18.0)
 	var desired_split := size.x - details_width - 18.0
 	workspace_split.split_offset = roundi(clampf(desired_split, 0.0, maxf(0.0, size.x)))
-	var available_workspace_height := maxf(340.0, size.y - 270.0)
-	var workspace_height := minf(465.0, available_workspace_height)
+	var available_workspace_height := maxf(340.0, size.y - 250.0)
+	var workspace_height := minf(550.0, available_workspace_height)
 	workspace_split.custom_minimum_size.y = workspace_height
 	if map_canvas != null:
 		map_canvas.custom_minimum_size = Vector2(minf(720.0, available_map_width), workspace_height)
+
+
+func _set_advanced(expanded: bool) -> void:
+	if _action_row == null or not has_node("TrackingErbFilters"):
+		return
+	_action_row.visible = true
+	_queue_row.visible = expanded
+	get_node("TrackingErbFilters").visible = expanded
+	get_node("TrackingRuntime").visible = expanded and not maintenance_cards.visible
 
 
 func _style_check(check: CheckButton) -> void:
