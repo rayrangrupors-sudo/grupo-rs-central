@@ -148,10 +148,9 @@ func _grupo_rs_api_get(path: String, retry_login: bool = true, force_read: bool 
 	return response
 
 
-func _process_inventory_communication_page(page_rows: Array[Dictionary]) -> void:
+func _process_inventory_communication_page(page_rows: Array[Dictionary]) -> Dictionary:
 	if not observer_active:
-		super._process_inventory_communication_page(page_rows)
-		return
+		return super._process_inventory_communication_page(page_rows)
 	_inc("location_pages")
 	if page_rows.is_empty():
 		_inc("empty_responses")
@@ -181,10 +180,11 @@ func _process_inventory_communication_page(page_rows: Array[Dictionary]) -> void
 		if candidate_count == 0:
 			_inc("unmatched_rows")
 		_record_key_family(location)
-	super._process_inventory_communication_page(page_rows)
+	var result := super._process_inventory_communication_page(page_rows)
 	# O hook de update confirma quantas linhas chegaram ao produto pelo matcher real.
 	if observer_page_matched > 0:
 		observer_metrics["matched_products"] = int(observer_metrics.get("matched_products", 0)) + observer_page_matched
+	return result
 
 
 func _update_inventory_communication_status(product: Dictionary, location: Dictionary) -> void:

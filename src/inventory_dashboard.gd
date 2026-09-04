@@ -171,7 +171,9 @@ const GRUPO_RS_API_LOCATION_CACHE_SECONDS := 1.0
 const GRUPO_RS_API_VEHICLE_CACHE_SECONDS := 300
 const GRUPO_RS_API_FAILURE_COOLDOWN_SECONDS := 300
 const GRUPO_RS_API_HEALTH_INTERVAL_SECONDS := 60
-const GRUPO_RS_API_MAINTENANCE_INTERVAL_SECONDS := 15.0
+const GRUPO_RS_API_MAINTENANCE_INTERVAL_SECONDS := 60.0
+const API_SESSION_RENEW_WINDOW_SECONDS := 300
+const API_SESSION_RETRY_SECONDS := 120
 const GRUPO_RS_API_RECONNECT_BACKOFF_SECONDS := [5, 15, 30, 60, 120, 300]
 const GRUPO_RS_WRITE_CONFIRM_ATTEMPTS := 2
 const GRUPO_RS_WRITE_CONFIRM_INITIAL_DELAY_SECONDS := 0.6
@@ -1333,6 +1335,10 @@ var linksolutions_sim_cache: Dictionary = {}
 var linksolutions_login_in_flight := false
 var internal_battery_refresh_timer: Timer
 var integration_maintenance_timer: Timer
+var integration_session_states: Dictionary = {}
+var integration_session_maintenance_running := false
+var integration_session_card_refs: Dictionary = {}
+var integration_session_summary_label: Label
 var inventory_device_cycle_generation := 0
 var inventory_device_cycle_signature := ""
 var inventory_device_cycle_running := false
@@ -1539,7 +1545,7 @@ var update_install_button: Button
 var update_restart_button: Button
 var update_rollback_button: Button
 var update_progress_bar: ProgressBar
-var config_selected_section := "arya"
+var config_selected_section := "connections"
 var config_secrets_revealed := false
 var bulk_last_auto_text := ""
 var bulk_import_pending := false
@@ -1580,6 +1586,8 @@ var formatting_plate_fields := {}
 var page_transition_id := 0
 var content_navigation_generation := 0
 var active_content_section := ""
+var sidebar_navigation_generation := 0
+var sidebar_navigation_running := false
 var auto_reset_timer: Timer
 var auto_reset_recheck_timer: Timer
 var auto_reset_countdown_timer: Timer
@@ -3862,7 +3870,10 @@ func _make_sidebar_button(
 	button.custom_minimum_size = Vector2(0, 46 if child else 56)
 	button.focus_mode = Control.FOCUS_NONE
 	if callback.is_valid():
-		button.pressed.connect(callback)
+		if section_key in ACTIVE_SCOPE_SECTIONS:
+			button.pressed.connect(func(): _request_sidebar_navigation(section_key, callback))
+		else:
+			button.pressed.connect(callback)
 	button.set_meta("section_key", section_key)
 	button.set_meta("icon_kind", icon_kind)
 	button.set_meta("sidebar_child", child)
@@ -4027,6 +4038,44 @@ func _set_page_context(section: String, title: String, subtitle: String = "") ->
 	var event_bus := _app_event_bus()
 	if event_bus != null:
 		event_bus.call("publish_page", section, title, subtitle)
+
+
+func _request_sidebar_navigation(section: String, callback: Callable) -> void:
+	if not callback.is_valid():
+		return
+	if sidebar_navigation_running and section == current_section:
+		return
+	sidebar_navigation_generation += 1
+	var request_id := sidebar_navigation_generation
+	sidebar_navigation_running = true
+	var previous_section := current_section
+
+	# Interrompe o trabalho da pagina antiga antes de liberar sua arvore visual.
+	# A pausa entre os quadros evita concentrar descarte, construcao e layout no
+	# mesmo frame, que era percebido como uma travada ao clicar no menu.
+	if previous_section == "inventory" and section != "inventory":
+		_clear_inventory_visible_scope()
+	if previous_section == "vehicle_location" and section != "vehicle_location":
+		vehicle_location_query_generation += 1
+		vehicle_location_query_queue.clear()
+		vehicle_location_pending_queries.clear()
+		vehicle_location_refreshing = false
+		st310_location_polling = false
+	current_section = "__transition__"
+	_update_page_scoped_timers()
+	_begin_content_navigation()
+	if is_instance_valid(content_area):
+		for child in content_area.get_children():
+			content_area.remove_child(child)
+			child.queue_free()
+	call_deferred("_continue_sidebar_navigation", section, callback, request_id)
+
+
+func _continue_sidebar_navigation(section: String, callback: Callable, request_id: int) -> void:
+	if request_id != sidebar_navigation_generation or not callback.is_valid():
+		return
+	callback.call()
+	sidebar_navigation_running = false
 
 
 func _make_sidebar_icon(icon_kind: String, color: Color) -> Control:
@@ -4977,8 +5026,80 @@ func _setup_integration_maintenance() -> void:
 
 func _run_integration_maintenance() -> void:
 	_prune_operational_caches()
-	if _grupo_rs_supports_modern_api() and _grupo_rs_api_reads_enabled():
-		_maintain_grupo_rs_api_session()
+	_maintain_integration_sessions()
+
+
+func _maintain_integration_sessions(force: bool = false) -> void:
+	if integration_session_maintenance_running:
+		return
+	integration_session_maintenance_running = true
+	await _maintain_named_session("grupo_rs", force)
+	await _maintain_named_session("arya", force)
+	await _maintain_named_session("linksolutions", force)
+	integration_session_states["aparelhos"] = (integration_session_states.get("grupo_rs", {}) as Dictionary).duplicate(true)
+	_refresh_api_session_card("aparelhos")
+	_refresh_api_session_summary()
+	integration_session_maintenance_running = false
+
+
+func _maintain_named_session(session_id: String, force: bool = false) -> Dictionary:
+	var now := int(Time.get_unix_time_from_system())
+	var previous: Dictionary = integration_session_states.get(session_id, {})
+	if not force and int(previous.get("next_retry_at", 0)) > now:
+		return previous
+	var token := _session_token(session_id)
+	var expires_at := _jwt_expiry_unix(token)
+	if not force and token != "" and (expires_at <= 0 or expires_at - now > API_SESSION_RENEW_WINDOW_SECONDS):
+		var connected := {"status": "connected", "checked_at": now, "expires_at": expires_at, "message": "Sessao pronta para uso."}
+		integration_session_states[session_id] = connected
+		_refresh_api_session_card(session_id)
+		_refresh_api_session_summary()
+		return connected
+	integration_session_states[session_id] = {"status": "renewing", "checked_at": now, "message": "Renovando sessao..."}
+	_refresh_api_session_card(session_id)
+	var result: Dictionary = {}
+	match session_id:
+		"grupo_rs":
+			if not _grupo_rs_supports_modern_api() or not _grupo_rs_api_reads_enabled():
+				result = {"ok": false, "message": "Integracao desativada ou indisponivel nesta filial."}
+			else:
+				grupo_rs_api_logged_in = false
+				grupo_rs_api_token = ""
+				result = await _grupo_rs_api_login()
+		"arya": result = await _ensure_arya_token(true)
+		"linksolutions": result = await _request_linksolutions_login()
+	var ok := bool(result.get("ok", false))
+	var state := {
+		"status": "connected" if ok else "unavailable",
+		"checked_at": int(Time.get_unix_time_from_system()),
+		"expires_at": _jwt_expiry_unix(_session_token(session_id)) if ok else 0,
+		"next_retry_at": 0 if ok else now + API_SESSION_RETRY_SECONDS,
+		"message": "Sessao autenticada." if ok else str(result.get("message", "Nao foi possivel autenticar.")),
+	}
+	integration_session_states[session_id] = state
+	_refresh_api_session_card(session_id)
+	_refresh_api_session_summary()
+	return state
+
+
+func _session_token(session_id: String) -> String:
+	match session_id:
+		"grupo_rs": return grupo_rs_api_token
+		"arya": return _arya_token()
+		"linksolutions": return _linksolutions_token()
+	return ""
+
+
+func _jwt_expiry_unix(token: String) -> int:
+	var parts := token.split(".")
+	if parts.size() < 2:
+		return 0
+	var payload := str(parts[1]).replace("-", "+").replace("_", "/")
+	while payload.length() % 4 != 0:
+		payload += "="
+	var decoded := Marshalls.base64_to_raw(payload).get_string_from_utf8()
+	var parsed: Variant = JSON.parse_string(decoded)
+	return int((parsed as Dictionary).get("exp", 0)) if parsed is Dictionary else 0
 
 
 func _pause_online_services() -> void:
@@ -9101,6 +9222,16 @@ func _show_list() -> void:
 	_set_page_context("inventory", "Estoque de equipamentos", "Cadastro, disponibilidade e situação dos rastreadores")
 	_set_content_margins(22, 16, 22, 14)
 	_set_content(_build_list_view())
+	# Entrega primeiro a estrutura da pagina ao renderizador. As dez linhas
+	# visiveis sao preenchidas no proximo ciclo, sem congelar o clique do menu.
+	call_deferred("_refresh_inventory_after_open", content_navigation_generation)
+
+
+func _refresh_inventory_after_open(navigation_id: int) -> void:
+	if current_section != "inventory" or navigation_id != content_navigation_generation:
+		return
+	if table_body == null or not is_instance_valid(table_body):
+		return
 	_refresh_table()
 
 
@@ -11234,9 +11365,9 @@ func _show_system_health() -> void:
 
 func _show_arya_config() -> void:
 	if config_selected_section == "sms" and not _branch_supports_sms():
-		config_selected_section = "grupo_rs"
+		config_selected_section = "connections"
 	if config_selected_section in ["luna", "codex"]:
-		config_selected_section = "grupo_rs"
+		config_selected_section = "connections"
 	_set_page_context("settings", "Configuracoes", "Integracoes, seguranca, atualizacoes e armazenamento")
 	_set_content_margins(28, 18, 28, 18)
 	_set_content(_build_arya_config_view(), true)
@@ -11451,7 +11582,6 @@ func _animate_content_in(control: Control) -> void:
 	tween.set_parallel(true)
 	tween.tween_property(control, "modulate:a", 1.0, MOTION_BASE).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	tween.tween_property(control, "position:y", 0.0, MOTION_SLOW).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-	_animate_children_cascade(control, 0.035, 0.04)
 
 
 func _animate_children_cascade(parent: Control, step_delay: float, base_delay: float = 0.0) -> void:
@@ -15261,6 +15391,9 @@ func _build_list_view() -> Control:
 	table_row_nodes.clear()
 	table_row_signatures.clear()
 	table_pager_signature = ""
+	# Os tres blocos superiores exibem o mesmo recorte. Calcula uma vez e
+	# compartilha o snapshot, evitando normalizar toda a base repetidamente.
+	var summary_stats := _inventory_summary_stats()
 	var root := VBoxContainer.new()
 	root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	root.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -15280,7 +15413,7 @@ func _build_list_view() -> Control:
 	title_row.add_child(title)
 
 	var count_pill := Label.new()
-	count_pill.text = "%s equipamentos" % _format_inventory_count(int(_inventory_summary_stats().get("total", 0)))
+	count_pill.text = "%s equipamentos" % _format_inventory_count(int(summary_stats.get("total", 0)))
 	count_pill.custom_minimum_size = Vector2(0, 30)
 	count_pill.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	count_pill.add_theme_font_override("font", UI_FONT)
@@ -15399,7 +15532,7 @@ func _build_list_view() -> Control:
 		replacement_button.tooltip_text = "Abrir a substituicao controlada entre duas placas"
 		toolbar.add_child(replacement_button)
 
-	status_quick_filters = _build_status_quick_filters()
+	status_quick_filters = _build_status_quick_filters(summary_stats)
 	var filter_and_period_row := HBoxContainer.new()
 	filter_and_period_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	filter_and_period_row.add_theme_constant_override("separation", 12)
@@ -15452,7 +15585,7 @@ func _build_list_view() -> Control:
 	table_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	table_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	table_panel.add_theme_stylebox_override("panel", _style_box(Color.WHITE, Color("#e4edf7"), 1, 10, true))
-	var summary_strip := _build_inventory_summary_strip(_inventory_summary_stats())
+	var summary_strip := _build_inventory_summary_strip(summary_stats)
 	root.add_child(summary_strip)
 	root.add_child(table_panel)
 
@@ -15484,7 +15617,6 @@ func _build_list_view() -> Control:
 	table_pager = _build_table_pager()
 	table_stack.add_child(table_pager)
 
-	_refresh_table()
 	return root
 
 
@@ -18052,16 +18184,17 @@ func _handoff_visible_inventory_device_cycle() -> void:
 
 
 func _run_visible_inventory_device_cycle(generation: int) -> void:
-	if _grupo_rs_supports_modern_api() and _grupo_rs_api_reads_enabled():
-		await _run_inventory_communication_visible_cycle(generation)
-		return
-
-	# Bases sem a API oficial moderna preservam o ciclo legado.
+	# Fluxo unico por linha: a serie consulta comunicacao no Grupo RS enquanto o
+	# ICCID resolve a APN e consulta o provedor correto em paralelo.
 	while inventory_device_cycle_running and is_inside_tree():
 		if generation != inventory_device_cycle_generation:
 			_handoff_visible_inventory_device_cycle()
 			return
 
+		# Cada rodada representa uma fotografia nova da pagina. Os resultados da
+		# rodada anterior servem apenas para exibicao ate este ponto e nunca sao
+		# reutilizados como resposta, fallback ou diagnostico da consulta seguinte.
+		_clear_inventory_device_round_results(inventory_device_cycle_products)
 		inventory_device_cycle_queue = inventory_device_cycle_products.duplicate(true)
 		inventory_device_cycle_workers = 0
 		while generation == inventory_device_cycle_generation and (not inventory_device_cycle_queue.is_empty() or inventory_device_cycle_workers > 0):
@@ -18084,6 +18217,24 @@ func _run_visible_inventory_device_cycle(generation: int) -> void:
 
 	if not is_inside_tree():
 		inventory_device_cycle_running = false
+
+
+func _clear_inventory_device_round_results(products: Array[Dictionary]) -> void:
+	for product in products:
+		var serial := _digits_only(_location_serial_for_product(product))
+		if serial != "":
+			location_status_cache.erase(serial)
+		var communication_key := _inventory_communication_cache_key_for_product(product)
+		if communication_key != "":
+			inventory_communication_status_cache.erase(communication_key)
+			inventory_communication_history.erase(communication_key)
+		var iccid := _arya_product_local_iccid(product)
+		if iccid != "":
+			arya_status_cache.erase(iccid)
+		var resolve_key := _arya_product_query_key(product)
+		if resolve_key != "":
+			arya_resolve_cache.erase(resolve_key)
+	_request_inventory_table_refresh()
 
 
 func _run_inventory_communication_visible_cycle(generation: int) -> void:
@@ -18471,8 +18622,11 @@ func _run_visible_inventory_device_lookup(product: Dictionary, generation: int, 
 	var serial := _digits_only(_location_serial_for_product(product))
 	if serial == "":
 		return true
-	var query_key := _arya_product_query_key(product)
-	var query_value := _arya_product_query_value(product)
+	# O ciclo automatico de chip parte exclusivamente do ICCID confirmado na
+	# linha. Sem ICCID, nao tenta adivinhar o SIM pela serie nem bloqueia a
+	# consulta de comunicacao do rastreador.
+	var query_value := _arya_product_local_iccid(product)
+	var query_key := query_value
 	if not _inventory_query_can_continue(generation, worker_state):
 		return false
 
@@ -18508,11 +18662,13 @@ func _run_visible_inventory_device_lookup(product: Dictionary, generation: int, 
 		_finish_inventory_query_state(serial, query_key, generation)
 		return false
 
-	var previous_location: Dictionary = location_status_cache.get(serial, {}).duplicate(true)
 	if bool(location_result.get("ok", false)):
+		var communication_row: Dictionary = location_result.get("communication_row", {}) as Dictionary
+		if not communication_row.is_empty():
+			_process_inventory_communication_page([communication_row])
 		_cache_location_status(serial, location_result)
 	else:
-		_cache_location_failure(serial, location_result, previous_location)
+		_cache_location_failure(serial, location_result, {})
 
 	var arya_result: Dictionary = chip_task.get("result", {}) as Dictionary
 
@@ -18523,16 +18679,6 @@ func _run_visible_inventory_device_lookup(product: Dictionary, generation: int, 
 
 	if query_value != "":
 		arya_result["checked_at"] = Time.get_unix_time_from_system()
-		# Uma falha transitória não deve apagar o último status confirmado do
-		# aparelho. Mantemos a leitura anterior e expomos a falha separadamente.
-		var previous_chip: Dictionary = arya_status_cache.get(query_key, {}) as Dictionary
-		if not bool(arya_result.get("ok", false)) and not previous_chip.is_empty():
-			var chip_error := str(arya_result.get("message", "Consulta temporariamente indisponível.")).strip_edges()
-			var preserved_chip := previous_chip.duplicate(true)
-			preserved_chip["stale"] = true
-			preserved_chip["last_error"] = chip_error
-			preserved_chip["checked_at"] = arya_result.get("checked_at")
-			arya_result = preserved_chip
 		arya_status_cache[query_key] = arya_result
 	var completed_location: Dictionary = location_status_cache.get(serial, {}).duplicate(true)
 	completed_location["records"] = records_result.get("event", {})
@@ -18567,11 +18713,34 @@ func _inventory_retry_wait(generation: int, worker_state: Dictionary) -> bool:
 
 func _inventory_query_location_with_retries(product: Dictionary, generation: int, worker_state: Dictionary, source_mode: String) -> Dictionary:
 	var serial := _digits_only(_location_serial_for_product(product))
+	var plate := str(product.get("plate", "")).strip_edges()
+	var client := str(product.get("client", "")).strip_edges()
+	var vehicle_id := str(product.get("vehicle_id", "")).strip_edges()
 	var last_result: Dictionary = {"ok": false, "message": "Localizacao nao consultada."}
 	for attempt in range(INVENTORY_QUERY_MAX_ATTEMPTS):
 		if not _inventory_query_can_continue(generation, worker_state):
 			return {"ok": false, "cancelled": true}
-		last_result = await _lookup_grupo_rs_location(serial, Callable(), source_mode)
+		# Na API moderna, uma unica consulta direta pela serie alimenta tanto a
+		# exibicao da linha quanto o classificador de comunicacao/GPS. A resposta
+		# bruta fica anexada para nao repetir a chamada nem perder seus campos.
+		if _grupo_rs_supports_modern_api() and _grupo_rs_api_reads_enabled():
+			var direct := await _grupo_rs_api_find_location(serial, plate, vehicle_id, false, INVENTORY_COMMUNICATION_PAGE_SIZE)
+			var raw_location: Dictionary = direct.get("location", {}) as Dictionary
+			if bool(direct.get("ok", false)) and not raw_location.is_empty():
+				last_result = _grupo_rs_api_location_result(serial, plate, client, raw_location)
+				if bool(last_result.get("ok", false)):
+					last_result["communication_row"] = raw_location
+			else:
+				last_result = direct
+				if bool(direct.get("ok", false)):
+					last_result["ok"] = false
+					last_result["message"] = "Localizacao nao encontrada para a serie informada."
+			# Portal/web continua como alternativa quando habilitado e a resposta
+			# direta nao fornece uma coordenada utilizavel.
+			if not bool(last_result.get("ok", false)) and _grupo_rs_platform_reads_enabled():
+				last_result = await _lookup_grupo_rs_location(serial, Callable(), source_mode, plate, client)
+		else:
+			last_result = await _lookup_grupo_rs_location(serial, Callable(), source_mode, plate, client)
 		if bool(last_result.get("ok", false)) or attempt + 1 >= INVENTORY_QUERY_MAX_ATTEMPTS or not _location_failure_is_transient(last_result):
 			return last_result
 		if not await _inventory_retry_wait(generation, worker_state):
@@ -18600,16 +18769,11 @@ func _inventory_query_chip_with_retries(product: Dictionary, generation: int, wo
 
 func _inventory_query_records_with_retries(product: Dictionary, location_result: Dictionary, generation: int, worker_state: Dictionary) -> Dictionary:
 	var vehicle_id := str(location_result.get("vehicle_id", "")).strip_edges()
-	if vehicle_id == "" and _grupo_rs_api_reads_enabled():
-		var plate := str(location_result.get("plate", product.get("plate", ""))).strip_edges()
-		# A consulta da linha atual nunca deve varrer a lista inteira de veiculos.
-		# A API ja devolve o codVeiculo na localizacao quando ele esta disponivel;
-		# se nao vier, fazemos apenas a busca direta por placa/serie.
-		var found := await _grupo_rs_api_find_vehicle(plate, _digits_only(_location_serial_for_product(product)), true, false)
-		if bool(found.get("ok", false)):
-			vehicle_id = str(found.get("vehicle_id", "")).strip_edges()
 	if vehicle_id == "":
-		return {"ok": false, "message": "Registros nao consultados: veiculo sem identificador."}
+		# Nao abra uma segunda busca de vinculacao no ciclo leve do estoque. Os
+		# registros so dependem do identificador que ja veio na localizacao; se a
+		# fonte nao o fornecer, a linha continua com comunicacao/chip atualizados.
+		return {"ok": false, "message": "Registros indisponiveis nesta resposta de comunicacao."}
 	var reference_datetime := str(location_result.get("updated_at", ""))
 	var last_result: Dictionary = {"ok": false, "message": "Registros nao consultados."}
 	for attempt in range(INVENTORY_QUERY_MAX_ATTEMPTS):
@@ -31266,28 +31430,10 @@ func _build_arya_config_view() -> Control:
 	var nav := VBoxContainer.new()
 	nav.add_theme_constant_override("separation", 5)
 	nav_scroll.add_child(nav)
-	var nav_title := Label.new()
-	nav_title.text = "CONEXOES E SERVICOS"
-	nav_title.custom_minimum_size = Vector2(0, 28)
-	nav_title.add_theme_font_override("font", UI_FONT)
-	nav_title.add_theme_font_size_override("font_size", 10)
-	nav_title.add_theme_color_override("font_color", MUTED)
-	nav.add_child(nav_title)
-	nav.add_child(_make_config_nav_button("Arya", "arya"))
-	nav.add_child(_make_config_nav_button("Grupo RS", "grupo_rs"))
-	var regional_title := Label.new()
-	regional_title.text = "BASES REGIONAIS"
-	regional_title.custom_minimum_size = Vector2(0, 25)
-	regional_title.add_theme_font_override("font", UI_FONT)
-	regional_title.add_theme_font_size_override("font_size", 10)
-	regional_title.add_theme_color_override("font_color", MUTED)
-	regional_title.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
-	nav.add_child(regional_title)
-	if _branch_supports_sms():
-		nav.add_child(_make_config_nav_button("SMS", "sms"))
+	nav.add_child(_make_config_nav_button("Conexoes das APIs", "connections"))
 	nav.add_child(_make_config_nav_button("Atualizacoes", "updates"))
 	var safe_note := Label.new()
-	safe_note.text = "Credenciais operacionais\npor filial no Banco local SQL."
+	safe_note.text = "Credenciais protegidas\npelo cofre de seguranca."
 	safe_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	safe_note.add_theme_font_override("font", UI_FONT)
 	safe_note.add_theme_font_size_override("font_size", 10)
@@ -31314,6 +31460,8 @@ func _build_arya_config_view() -> Control:
 	stack.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	stack.add_theme_constant_override("separation", 9)
 	content_margin.add_child(stack)
+	if config_selected_section not in ["connections", "updates"]:
+		_build_config_detail_back(stack)
 
 	if _config_section_requires_vault(config_selected_section):
 		var vault := _secret_vault()
@@ -31324,6 +31472,8 @@ func _build_arya_config_view() -> Control:
 		_build_config_vault_toolbar(stack)
 
 	match config_selected_section:
+		"connections":
+			_build_config_connections_section(stack)
 		"local_database":
 			_build_config_local_database_section(stack)
 		"grupo_rs":
@@ -31341,8 +31491,8 @@ func _build_arya_config_view() -> Control:
 		"updates":
 			_build_config_updates_section(stack, settings)
 		_:
-			config_selected_section = "arya"
-			_build_config_arya_section(stack, settings)
+			config_selected_section = "connections"
+			_build_config_connections_section(stack)
 
 	if _config_section_requires_vault(config_selected_section):
 		_populate_unlocked_config_credentials(settings)
@@ -31392,6 +31542,242 @@ func _build_config_local_database_section(stack: VBoxContainer) -> void:
 	stack.add_child(local_database_config_status_label)
 
 
+func _build_config_connections_section(stack: VBoxContainer) -> void:
+	integration_session_card_refs.clear()
+	_add_config_section_heading(stack, "Conexoes das APIs", "Gerencie e acompanhe as integracoes do sistema.")
+	stack.add_child(_make_api_session_summary_bar())
+	var grid := GridContainer.new()
+	grid.name = "ApiSessionGrid"
+	grid.columns = 2
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	grid.add_theme_constant_override("h_separation", 10)
+	grid.add_theme_constant_override("v_separation", 10)
+	stack.add_child(grid)
+	for definition in [
+		{"id": "grupo_rs", "label": "Grupo RS", "detail": "Cadastro e localizacao"},
+		{"id": "aparelhos", "label": "API de aparelhos", "detail": "Comunicacao e ignicao"},
+		{"id": "arya", "label": "Arya / Innova", "detail": "Status dos chips Innova"},
+		{"id": "linksolutions", "label": "Link Solutions", "detail": "Status dos chips Link"},
+	]:
+		grid.add_child(_make_api_session_card(definition))
+	stack.add_child(_make_api_security_note())
+	_refresh_api_session_summary()
+
+
+func _make_api_session_summary_bar() -> Control:
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(0, 54)
+	panel.add_theme_stylebox_override("panel", _style_box(Color("#F8FBFF"), Color("#D7E4F1"), 1, 10))
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 16)
+	margin.add_theme_constant_override("margin_right", 10)
+	margin.add_theme_constant_override("margin_top", 6)
+	margin.add_theme_constant_override("margin_bottom", 6)
+	panel.add_child(margin)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	margin.add_child(row)
+	integration_session_summary_label = Label.new()
+	integration_session_summary_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	integration_session_summary_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	integration_session_summary_label.add_theme_font_override("font", UI_FONT)
+	integration_session_summary_label.add_theme_font_size_override("font_size", 13)
+	integration_session_summary_label.add_theme_color_override("font_color", Color("#45627D"))
+	row.add_child(integration_session_summary_label)
+	row.add_child(_make_action_button("Testar conexoes", Color.WHITE, Color("#2687E8"), Color("#0868C8"), Vector2(168, 38), _test_integration_sessions_from_settings))
+	return panel
+
+
+func _make_api_security_note() -> Control:
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(0, 52)
+	panel.add_theme_stylebox_override("panel", _style_box(Color("#F4F8FE"), Color("#D6E5F5"), 1, 9))
+	var label := Label.new()
+	label.text = "  Credenciais protegidas pelo cofre de seguranca."
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	label.add_theme_font_override("font", UI_FONT)
+	label.add_theme_font_size_override("font_size", 13)
+	label.add_theme_color_override("font_color", Color("#526B84"))
+	panel.add_child(label)
+	return panel
+
+
+func _make_api_session_card(definition: Dictionary) -> Control:
+	var state: Dictionary = integration_session_states.get(str(definition.get("id", "")), {})
+	var status := str(state.get("status", "checking"))
+	var palettes := {
+		"connected": [Color("#EAF8F1"), Color("#79D3A8"), Color("#087A4D"), "Conectada"],
+		"renewing": [Color("#FFF7E8"), Color("#F2C36B"), Color("#A86600"), "Renovando"],
+		"unavailable": [Color("#FFF0F1"), Color("#EFA5AD"), Color("#B42332"), "Indisponivel"],
+		"checking": [Color("#F3F6FA"), Color("#CED9E4"), Color("#5E7185"), "Aguardando"],
+	}
+	var palette: Array = palettes.get(status, palettes["checking"])
+	var panel := Button.new()
+	panel.name = "ApiSessionCard_%s" % str(definition.get("id", ""))
+	panel.text = ""
+	panel.focus_mode = Control.FOCUS_NONE
+	panel.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	panel.custom_minimum_size = Vector2(0, 154)
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.add_theme_stylebox_override("normal", _style_box(Color.WHITE, Color("#CBDDEA"), 1, 11, true))
+	panel.add_theme_stylebox_override("hover", _style_box(Color("#F8FBFF"), Color("#66ADEF"), 1, 11, true))
+	panel.add_theme_stylebox_override("pressed", _style_box(Color("#EEF6FF"), Color("#2687E8"), 1, 11, true))
+	var margin := MarginContainer.new()
+	margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	margin.add_theme_constant_override("margin_left", 20)
+	margin.add_theme_constant_override("margin_right", 18)
+	margin.add_theme_constant_override("margin_top", 20)
+	margin.add_theme_constant_override("margin_bottom", 20)
+	panel.add_child(margin)
+	var body := HBoxContainer.new()
+	body.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	body.add_theme_constant_override("separation", 18)
+	margin.add_child(body)
+	var icon_shell := PanelContainer.new()
+	icon_shell.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	icon_shell.custom_minimum_size = Vector2(74, 74)
+	var icon_fill := Color("#F0F7FF") if str(definition.get("id", "")) in ["grupo_rs", "arya"] else Color("#FFF5E9")
+	icon_shell.add_theme_stylebox_override("panel", _style_box(icon_fill, Color("#CFE2F5"), 1, 12))
+	body.add_child(icon_shell)
+	var icon_margin := MarginContainer.new()
+	icon_margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	icon_margin.add_theme_constant_override("margin_left", 19)
+	icon_margin.add_theme_constant_override("margin_right", 19)
+	icon_margin.add_theme_constant_override("margin_top", 19)
+	icon_margin.add_theme_constant_override("margin_bottom", 19)
+	icon_shell.add_child(icon_margin)
+	var icon := TextureRect.new()
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	icon.texture = load(_api_session_icon_path(str(definition.get("id", ""))))
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.modulate = Color("#0B416D")
+	icon_margin.add_child(icon)
+	var content := VBoxContainer.new()
+	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	content.add_theme_constant_override("separation", 4)
+	body.add_child(content)
+	var row := HBoxContainer.new()
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	content.add_child(row)
+	var title := Label.new()
+	title.text = str(definition.get("label", "API"))
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title.add_theme_font_override("font", UI_FONT)
+	title.add_theme_font_size_override("font_size", 17)
+	title.add_theme_color_override("font_color", BLUE_DARK)
+	row.add_child(title)
+	var badge := Label.new()
+	badge.text = str(palette[3])
+	badge.custom_minimum_size = Vector2(100, 30)
+	badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	badge.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	badge.add_theme_font_override("font", UI_FONT)
+	badge.add_theme_font_size_override("font_size", 12)
+	badge.add_theme_color_override("font_color", palette[2])
+	badge.add_theme_stylebox_override("normal", _style_box(palette[0], palette[1], 1, 14))
+	row.add_child(badge)
+	var chevron := Label.new()
+	chevron.text = "   ›"
+	chevron.custom_minimum_size = Vector2(38, 0)
+	chevron.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	chevron.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	chevron.add_theme_font_override("font", UI_FONT)
+	chevron.add_theme_font_size_override("font_size", 20)
+	chevron.add_theme_color_override("font_color", Color("#0878DB"))
+	row.add_child(chevron)
+	var detail := Label.new()
+	detail.text = str(definition.get("detail", ""))
+	detail.add_theme_font_override("font", UI_FONT)
+	detail.add_theme_font_size_override("font_size", 12)
+	detail.add_theme_color_override("font_color", MUTED)
+	content.add_child(detail)
+	var checked := Label.new()
+	var checked_at := int(state.get("checked_at", 0))
+	checked.text = "◷  Ultima validacao: %s" % (_format_session_check_time(checked_at) if checked_at > 0 else "ainda nao realizada")
+	checked.add_theme_font_override("font", UI_FONT)
+	checked.add_theme_font_size_override("font_size", 11)
+	checked.add_theme_color_override("font_color", palette[2])
+	content.add_child(checked)
+	var session_id := str(definition.get("id", ""))
+	integration_session_card_refs[session_id] = {"badge": badge, "checked": checked, "panel": panel}
+	panel.pressed.connect(func(): _open_api_connection_details(session_id))
+	return panel
+
+
+func _api_session_icon_path(session_id: String) -> String:
+	match session_id:
+		"grupo_rs": return ICON_DIR + "navigation/monitor.svg"
+		"aparelhos": return ICON_DIR + "navigation/communications.svg"
+		"arya": return ICON_DIR + "navigation/inventory.svg"
+		"linksolutions": return ICON_DIR + "navigation/guardian.svg"
+	return ICON_DIR + "navigation/settings.svg"
+
+
+func _format_session_check_time(unix_time: int) -> String:
+	var value := Time.get_datetime_dict_from_unix_time(unix_time)
+	return "%02d/%02d/%04d %02d:%02d" % [value.day, value.month, value.year, value.hour, value.minute]
+
+
+func _test_integration_sessions_from_settings() -> void:
+	await _maintain_integration_sessions(true)
+	_refresh_api_session_summary()
+
+
+func _open_api_connection_details(session_id: String) -> void:
+	match session_id:
+		"grupo_rs", "aparelhos": _show_config_section("grupo_rs")
+		"arya": _show_config_section("arya")
+		"linksolutions": _show_config_section("linksolutions")
+
+
+func _build_config_detail_back(stack: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	stack.add_child(row)
+	row.add_child(_make_action_button("< Voltar para conexoes", Color("#F4F8FC"), Color("#C9D9E7"), BLUE_DARK, Vector2(190, 36), func(): _show_config_section("connections")))
+
+
+func _api_session_palette(status: String) -> Array:
+	match status:
+		"connected": return [Color("#EAF8F1"), Color("#79D3A8"), Color("#087A4D"), "Conectada"]
+		"renewing": return [Color("#FFF7E8"), Color("#F2C36B"), Color("#A86600"), "Renovando"]
+		"unavailable": return [Color("#FFF0F1"), Color("#EFA5AD"), Color("#B42332"), "Indisponivel"]
+	return [Color("#F3F6FA"), Color("#CED9E4"), Color("#5E7185"), "Aguardando"]
+
+
+func _refresh_api_session_card(session_id: String) -> void:
+	if current_section != "settings" or config_selected_section != "connections":
+		return
+	var refs: Dictionary = integration_session_card_refs.get(session_id, {})
+	if refs.is_empty():
+		return
+	var badge: Label = refs.get("badge") as Label
+	var checked: Label = refs.get("checked") as Label
+	if not is_instance_valid(badge) or not is_instance_valid(checked):
+		return
+	var state: Dictionary = integration_session_states.get(session_id, {})
+	var palette := _api_session_palette(str(state.get("status", "checking")))
+	badge.text = str(palette[3])
+	badge.add_theme_color_override("font_color", palette[2])
+	badge.add_theme_stylebox_override("normal", _style_box(palette[0], palette[1], 1, 14))
+	var checked_at := int(state.get("checked_at", 0))
+	checked.text = "◷  Ultima validacao: %s" % (_format_session_check_time(checked_at) if checked_at > 0 else "ainda nao realizada")
+	checked.add_theme_color_override("font_color", palette[2])
+
+
+func _refresh_api_session_summary() -> void:
+	if not is_instance_valid(integration_session_summary_label):
+		return
+	var connected := 0
+	for session_id in ["grupo_rs", "aparelhos", "arya", "linksolutions"]:
+		if str((integration_session_states.get(session_id, {}) as Dictionary).get("status", "")) == "connected":
+			connected += 1
+	integration_session_summary_label.text = "●  %d de 4 conexoes disponiveis" % connected
+	integration_session_summary_label.add_theme_color_override("font_color", Color("#087A4D") if connected == 4 else Color("#A86600"))
+
+
 func _save_local_database_configuration() -> void:
 	var local_database_sync := _local_database_sync()
 	if local_database_sync == null:
@@ -31406,7 +31792,7 @@ func _save_local_database_configuration() -> void:
 
 func _show_config_section(section_key: String) -> void:
 	if section_key == "sms" and not _branch_supports_sms():
-		config_selected_section = "grupo_rs"
+		config_selected_section = "connections"
 		_show_arya_config()
 		return
 	config_selected_section = section_key
@@ -31414,7 +31800,7 @@ func _show_config_section(section_key: String) -> void:
 
 
 func _config_section_requires_vault(section_key: String) -> bool:
-	return section_key not in ["updates", "local_database"]
+	return section_key not in ["updates", "local_database", "connections"]
 
 
 func _build_config_vault_unlock(stack: VBoxContainer) -> void:
@@ -31632,6 +32018,8 @@ func _make_config_nav_button(text_value: String, section_key: String) -> Button:
 
 func _config_nav_icon_path(section_key: String) -> String:
 	match section_key:
+		"connections":
+			return ICON_DIR + "navigation/communications.svg"
 		"local_database":
 			return ICON_DIR + "navigation/communications.svg"
 		"arya", "codex", "luna":
@@ -34894,10 +35282,6 @@ func _refresh_table() -> void:
 	_hide_search_busy()
 	var products := _filtered_products()
 	var total_count := products.size()
-	# A conectividade do chip é independente do status do rastreador: consulta
-	# automaticamente a Arya para as linhas visíveis, respeitando cache e fila.
-	if not _is_regional_branch():
-		_schedule_visible_arya_status_batch(products, 0, products.size(), total_count)
 	var existing_rows := {}
 	var disposable_nodes: Array[Node] = []
 	for child in table_body.get_children():
@@ -35215,13 +35599,13 @@ func _make_page_button(text_value: String, enabled: bool, callback: Callable, se
 	return button
 
 
-func _build_status_quick_filters() -> HBoxContainer:
+func _build_status_quick_filters(summary_stats: Dictionary = {}) -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.alignment = BoxContainer.ALIGNMENT_BEGIN
 	row.add_theme_constant_override("separation", 6)
 
-	var stats := _inventory_summary_stats()
+	var stats := summary_stats if not summary_stats.is_empty() else _inventory_summary_stats()
 	var statuses := ["Todos", "Estoque", "Instalado", "Parado"] if _is_regional_branch() else ["Todos", "Estoque", "Reserva", "Instalado", "Manutenção", "Inativos"]
 	for status in statuses:
 		var key := "all" if status == "Todos" else ("manutencao" if status == "Manutenção" else ("inativo" if status == "Inativos" else _status_key_from_text(status)))
@@ -35346,7 +35730,9 @@ func _style_status_filter_button(button: Button, active: bool) -> void:
 func _filtered_products() -> Array[Dictionary]:
 	var query := str(search_input.text if search_input else "").strip_edges()
 	var filter := selected_status_filter_key
-	var all_products := store.get_products(query, "all", false)
+	# Esta lista sera ordenada pelo criterio visual logo abaixo. Evita a
+	# ordenacao alfabetica intermediaria feita pelo armazenamento.
+	var all_products := store.get_products(query, "all", false, false)
 
 	var result: Array[Dictionary] = []
 
@@ -36373,6 +36759,18 @@ func _resolve_arya_iccid_for_product(product: Dictionary) -> Dictionary:
 					break
 			if chosen.is_empty() and typeof(rows[0]) == TYPE_DICTIONARY:
 				chosen = rows[0] as Dictionary
+	# Se a linha ja possui ICCID, ele tambem pode resolver diretamente a APN.
+	# Isso evita depender apenas da serie quando o cadastro do equipamento ainda
+	# nao estiver sincronizado, sem aceitar um chip diferente do solicitado.
+	if local_iccid != "" and (chosen.is_empty() or str(chosen.get("apn", "")).strip_edges() == ""):
+		var chip_rows := await _fetch_grupo_rs_equipment_rows(local_iccid)
+		for row in chip_rows:
+			if typeof(row) != TYPE_DICTIONARY:
+				continue
+			var chip_candidate := row as Dictionary
+			if _digits_only(str(chip_candidate.get("chip", ""))) == local_iccid:
+				chosen = chip_candidate
+				break
 
 	var apn := ""
 	if not chosen.is_empty():

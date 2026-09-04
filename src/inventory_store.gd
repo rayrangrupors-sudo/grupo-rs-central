@@ -457,7 +457,12 @@ func _find_google_drive_root() -> String:
 	return ""
 
 
-func get_products(query: String = "", category: String = "", low_stock_only: bool = false) -> Array[Dictionary]:
+func get_products(
+	query: String = "",
+	category: String = "",
+	low_stock_only: bool = false,
+	sort_results: bool = true
+) -> Array[Dictionary]:
 	if not _loaded:
 		load_db()
 
@@ -485,13 +490,14 @@ func get_products(query: String = "", category: String = "", low_stock_only: boo
 
 		result.append(item)
 
-	result.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		var a_name := str(a.get("name", "")).to_lower()
-		var b_name := str(b.get("name", "")).to_lower()
-		if a_name == b_name:
-			return str(a.get("sku", "")).to_lower() < str(b.get("sku", "")).to_lower()
-		return a_name < b_name
-	)
+	if sort_results:
+		result.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			var a_name := str(a.get("name", "")).to_lower()
+			var b_name := str(b.get("name", "")).to_lower()
+			if a_name == b_name:
+				return str(a.get("sku", "")).to_lower() < str(b.get("sku", "")).to_lower()
+			return a_name < b_name
+		)
 
 	return result
 
